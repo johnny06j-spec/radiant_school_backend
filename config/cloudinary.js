@@ -16,9 +16,14 @@ const storage = new CloudinaryStorage({
   cloudinary: cloudinary,
   params: {
     folder: 'student_passports',
-    allowed_formats: ['jpg', 'png', 'jpeg'],
-    transformation: [{ width: 400, height: 400, crop: 'limit' }], // Safeguards image sizes
+    // 🟢 Added webp, heic, heif, and jfif so mobile phone camera formats upload cleanly without failing
+    allowed_formats: ['jpg', 'png', 'jpeg', 'webp', 'heic', 'heif', 'jfif'],
+    transformation: [{ width: 500, height: 500, crop: 'limit', quality: 'auto' }],
   },
 });
 
-export const uploadPassport = multer({ storage: storage });
+export const uploadPassport = multer({
+  storage: storage,
+  // 🟢 Raised upload limit to 10MB to accommodate high-res mobile snaps
+  limits: { fileSize: 10 * 1024 * 1024 },
+});
