@@ -30,12 +30,23 @@ router.get('/me', verifyToken, async (req, res) => {
   }
 });
 
-// 🚀 Secured student registration endpoint (Restricted to logged-in admins)
+// 🚀 Secured student registration endpoint with Multer error trapping
 router.post(
   '/register-student', 
   verifyToken, 
   isAdmin, 
-  uploadPassport.single('passportPhoto'), 
+  (req, res, next) => {
+    uploadPassport.single('passportPhoto')(req, res, (err) => {
+      if (err) {
+        console.error("💥 Multer/Cloudinary upload exception:", err);
+        return res.status(400).json({
+          success: false,
+          message: err.message || "Failed to process image attachment. Ensure the image is under 10MB."
+        });
+      }
+      next();
+    });
+  }, 
   registerStudent
 );
 
