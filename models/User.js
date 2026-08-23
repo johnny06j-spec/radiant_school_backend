@@ -20,16 +20,23 @@ const userSchema = new mongoose.Schema({
   username: { 
     type: String, 
     required: true, 
-    unique: true,
+    unique: true, 
     trim: true 
-  }, // e.g., "john.doe" for teachers, or "RC/26/4829" for students
+  },
   password: { 
     type: String, 
     required: true 
   },
   role: { 
     type: String, 
-    enum: ['admin', 'teacher', 'principal', 'student'], 
+    enum: [
+      'admin',
+      'teacher',
+      'principal',
+      'headmaster',
+      'student'
+    ], 
+    lowercase: true,
     default: 'student' 
   },
   phone: {
@@ -46,7 +53,7 @@ const userSchema = new mongoose.Schema({
     default: 'General'
   },
   assignedClass: {
-    type: String, // Used for Primary Tutors (e.g., "KG 1", "Basic 3")
+    type: String,
     default: ''
   },
   assignedClasses: [{ type: String }],
@@ -59,7 +66,7 @@ const userSchema = new mongoose.Schema({
   },
   classTeacherOf: { 
     type: String, 
-    default: '' // e.g., "JSS 1", "Basic 4"
+    default: ''
   },
   
   // 🎯 Flexible Subject Allocations for Secondary & Primary Tutors
