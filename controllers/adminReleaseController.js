@@ -25,7 +25,6 @@ export const getApprovedExecutiveReviews = async (req, res) => {
     const cleanClass = className.trim();
     const classRegex = new RegExp(`^${cleanClass.replace(/\s+/g, '\\s*')}$`, 'i');
 
-    // Query strictly approved reviews awaiting admin release
     const reviews = await ResultReview.find({
       $or: [{ className: classRegex }, { class: classRegex }],
       term: term.trim(),
@@ -58,8 +57,6 @@ export const getApprovedExecutiveReviews = async (req, res) => {
           (studentDoc ? `${studentDoc.surname || ''} ${studentDoc.firstName || studentDoc.firstname || studentDoc.name || ''}`.trim() : 'Student');
         
         const displayAdm = rev.admissionNo || studentDoc?.admissionNo || studentDoc?.registrationNo || 'N/A';
-
-        // Read pre-calculated cumulative overall average directly from the HM approved review document
         const verifiedAverage = Number(rev.overallAverage || 0).toFixed(2);
 
         return {
@@ -127,7 +124,6 @@ export const adminReturnClassResults = async (req, res) => {
       });
     }
 
-    // 1. Revert ResultReview documents
     const updatedReviews = await ResultReview.updateMany(targetQuery, {
       $set: {
         status: 'Returned for Revision',
@@ -141,7 +137,6 @@ export const adminReturnClassResults = async (req, res) => {
       }
     });
 
-    // 2. Revert GradingGrid top-level status and inner scores
     if (className && term && session) {
       const classRegex = new RegExp(`^${className.trim().replace(/\s+/g, '\\s*')}$`, 'i');
       await GradingGrid.updateMany(
@@ -219,8 +214,7 @@ export const releaseClassResults = async (req, res) => {
       });
     }
 
-    const isThirdTerm = term.toLowerCase().includes('third');
-
+    // 🟢 Publish results to student portals without mutating live currentClass prematurely
     for (const review of approvedReviews) {
       await ResultReview.findByIdAndUpdate(review._id, {
         $set: {
@@ -229,12 +223,6 @@ export const releaseClassResults = async (req, res) => {
           releasedBy: req.user?.name || req.user?.username || 'Admin User'
         }
       });
-
-      if (isThirdTerm && review.promotionDecision === 'PROMOTED' && review.promotedToClass) {
-        await Student.findByIdAndUpdate(review.studentId, {
-          $set: { currentClass: review.promotedToClass, assignedClass: review.promotedToClass }
-        });
-      }
     }
 
     await GradingGrid.updateMany(
@@ -259,7 +247,7 @@ export const releaseClassResults = async (req, res) => {
 
 /**
  * @route   GET /api/teachers/released-history
- * @desc    Fetch true published result archives
+ * @desc    Fetch published result archives
  */
 export const getReleaseHistory = async (req, res) => {
   try {
@@ -370,7 +358,6 @@ export const deleteResultRecord = async (req, res) => {
 
     const isMongoId = mongoose.Types.ObjectId.isValid(targetId);
 
-    // 1. Delete from ResultReview
     if (isMongoId) {
       await ResultReview.findByIdAndDelete(targetId).catch(() => null);
     }
@@ -379,7 +366,6 @@ export const deleteResultRecord = async (req, res) => {
       await ResultReview.findOneAndDelete({ studentId }).catch(() => null);
     }
 
-    // 2. Build pull filter array for GradingGrid subdocuments
     const pullConditions = [];
 
     if (targetId && targetId !== 'undefined' && targetId !== 'orphaned') {
@@ -409,7 +395,6 @@ export const deleteResultRecord = async (req, res) => {
       });
     }
 
-    // 3. Remove student entry across corresponding GradingGrids
     const classFilter = {};
     if (className) classFilter.className = new RegExp(`^${className.trim().replace(/\s+/g, '\\s*')}$`, 'i');
     if (term) classFilter.term = term;
