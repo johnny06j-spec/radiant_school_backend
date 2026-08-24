@@ -1,5 +1,8 @@
 // controllers/configController.js
 import SystemConfig from '../models/SystemConfig.js';
+import Student from '../models/Student.js';
+import User from '../models/User.js';
+import ResultReview from '../models/ResultReview.js';
 
 /**
  * @route   GET /api/system/config
@@ -10,7 +13,6 @@ export const getSystemConfig = async (req, res) => {
   try {
     let config = await SystemConfig.findOne({});
 
-    // If no configuration exists yet, seed and persist the initial baseline
     if (!config) {
       config = await SystemConfig.create({
         currentSession: "2026/2027",
@@ -34,14 +36,13 @@ export const getSystemConfig = async (req, res) => {
 
 /**
  * @route   PUT /api/system/config
- * @desc    Update global academic session settings
+ * @desc    Update global academic session settings & perform automated student promotions on session rollover
  * @access  Private (Admin Only)
  */
 export const updateSystemConfig = async (req, res) => {
   try {
     const { currentSession, currentTerm } = req.body;
 
-    // Validate parameters cleanly
     if (!currentSession || !currentTerm) {
       return res.status(400).json({
         success: false,
@@ -49,9 +50,12 @@ export const updateSystemConfig = async (req, res) => {
       });
     }
 
-    // Upsert the single global system configuration document
+    const previousConfig = await SystemConfig.findOne({});
+    const isNewSessionRollover = previousConfig && previousConfig.currentSession !== String(currentSession).trim();
+
+    // 1. Update system config
     const updatedConfig = await SystemConfig.findOneAndUpdate(
-      {}, // Finds the single configuration record in collection
+      {},
       { 
         $set: { 
           currentSession: String(currentSession).trim(), 
@@ -61,11 +65,59 @@ export const updateSystemConfig = async (req, res) => {
       { new: true, upsert: true, runValidators: true }
     );
 
+    let promotedCount = 0;
+
+    // 2. Automated Class Promotion on Session Advance (e.g. from 2026/2027 -> 2027/2028)
+    if (isNewSessionRollover) {
+      const pastSession = previousConfig.currentSession;
+      
+      // Fetch all approved Third Term reviews from the concluding session
+      const approvedThirdTermReviews = await ResultReview.find({
+        session: pastSession,
+        term: /third/i,
+        promotionDecision: 'PROMOTED',
+        promotedToClass: { $exists: true, $ne: '' }
+      }).lean();
+
+      for (const review of approvedThirdTermReviews) {
+        if (!review.studentId) continue;
+
+        const nextClass = review.promotedToClass.trim();
+        const isGraduating = /graduate/i.test(nextClass);
+
+        const updatePayload = {
+          currentClass: nextClass,
+          assignedClass: nextClass,
+          status: isGraduating ? 'Graduated' : 'Active'
+        };
+
+        const updatedStudent = await Student.findByIdAndUpdate(
+          review.studentId,
+          { $set: updatePayload },
+          { new: true }
+        );
+
+        if (updatedStudent && updatedStudent.user) {
+          await User.findByIdAndUpdate(updatedStudent.user, {
+            $set: { assignedClass: nextClass, status: isGraduating ? 'Graduated' : 'Active' }
+          });
+        }
+
+        promotedCount++;
+      }
+    }
+
+    const promoMessage = promotedCount > 0 
+      ? ` and promoted ${promotedCount} students to their new class tiers!` 
+      : '!';
+
     return res.status(200).json({
       success: true,
-      message: `Academic settings successfully updated to ${updatedConfig.currentSession} (${updatedConfig.currentTerm})!`,
-      data: updatedConfig
+      message: `Academic settings updated to ${updatedConfig.currentSession} (${updatedConfig.currentTerm})${promoMessage}`,
+      data: updatedConfig,
+      promotedStudentsCount: promotedCount
     });
+
   } catch (error) {
     console.error("💥 System configuration update exception:", error);
     return res.status(500).json({ 

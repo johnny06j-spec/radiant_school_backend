@@ -6,7 +6,7 @@ import { buildStudentResultSubjects } from '../utils/resultEngine.js';
 
 /**
  * @route   POST /api/teachers/principal-approve
- * @desc    Approve student result & forward to Admin Release Desk
+ * @desc    Approve student result & stamp promotion decision without premature class mutation
  */
 export const approveResultByPrincipal = async (req, res) => {
   try {
@@ -37,7 +37,7 @@ export const approveResultByPrincipal = async (req, res) => {
     const finalNextClass = (isThirdTerm && finalPromotion === 'PROMOTED') ? (promotedToClass || '') : '';
     const remark = principalRemark || executiveRemark || 'Satisfactory academic performance.';
 
-    // 1. Force the engine to calculate the canonical cumulative scores (with Brought Forward)
+    // 1. Force the engine to calculate canonical cumulative scores (with Brought Forward)
     const computedData = await buildStudentResultSubjects({
       studentId,
       studentDoc,
@@ -46,7 +46,6 @@ export const approveResultByPrincipal = async (req, res) => {
       session: session.trim()
     });
 
-    // 2. Lock in the calculated cumulative average and subjects array as the ultimate source of truth
     const finalSubjects = computedData?.subjects?.length > 0 ? computedData.subjects : [];
     const finalOverallAvg = computedData?.overallAverage !== undefined && computedData?.overallAverage !== null 
       ? Number(computedData.overallAverage) 
@@ -71,8 +70,8 @@ export const approveResultByPrincipal = async (req, res) => {
       promotedToClass: finalNextClass,
       reviewedByRole: userRole || 'executive',
       rejectionReason: '',
-      subjects: finalSubjects,             // Contains exact CUM B.F. scores
-      overallAverage: finalOverallAvg,     // Forces 76.95 instead of 69.91
+      subjects: finalSubjects,
+      overallAverage: finalOverallAvg,
       overallGrade: finalOverallGrade
     };
 
@@ -100,18 +99,10 @@ export const approveResultByPrincipal = async (req, res) => {
       );
     }
 
-    if (isThirdTerm && finalPromotion === 'PROMOTED' && finalNextClass) {
-      await Student.findByIdAndUpdate(studentId, {
-        $set: { 
-          currentClass: finalNextClass,
-          assignedClass: finalNextClass 
-        }
-      });
-    }
-
+    // 🟢 Class promotion decision is stamped on ResultReview and executed on new session rollover.
     return res.status(200).json({
       success: true,
-      message: `Result for ${displayName} approved successfully with true cumulative average!`,
+      message: `Result for ${displayName} approved successfully! Promotion decision stamped.`,
       data: updatedReview
     });
   } catch (error) {
