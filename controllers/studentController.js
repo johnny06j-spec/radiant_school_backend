@@ -5,6 +5,7 @@ import FeeStructure from '../models/FeeStructure.js';
 import Payment from '../models/Payment.js';
 import SystemConfig from '../models/SystemConfig.js';
 import Adjustment from '../models/Adjustment.js';
+import ResultReview from '../models/ResultReview.js';
 import bcrypt from 'bcryptjs';
 
 /**
@@ -112,7 +113,6 @@ export const linkSibling = async (req, res) => {
 
     const cleanedRef = admissionNo.trim();
 
-    // 1. Locate current student context
     const currentStudent = await Student.findOne({
       $or: [{ _id: currentStudentId }, { user: currentStudentId }]
     });
@@ -124,7 +124,6 @@ export const linkSibling = async (req, res) => {
       });
     }
 
-    // 2. Find target sibling and populate associated User model with password
     const targetSibling = await Student.findOne({
       $or: [
         { admissionNo: new RegExp(`^${cleanedRef}$`, 'i') },
@@ -145,7 +144,6 @@ export const linkSibling = async (req, res) => {
       });
     }
 
-    // 3. Prevent self-linking
     if (
       targetSibling._id.toString() === currentStudent._id.toString() ||
       (targetSibling.user && targetSibling.user._id.toString() === currentStudent.user?.toString())
@@ -156,9 +154,7 @@ export const linkSibling = async (req, res) => {
       });
     }
 
-    // 4. Verify password across Student and User models
     let isMatch = false;
-
     if (targetSibling.password) {
       isMatch = await bcrypt.compare(password, targetSibling.password);
     }
@@ -167,7 +163,6 @@ export const linkSibling = async (req, res) => {
       isMatch = await bcrypt.compare(password, targetSibling.user.password);
     }
 
-    // Fallback unhashed check
     if (!isMatch) {
       if (
         targetSibling.password === password ||
@@ -184,7 +179,6 @@ export const linkSibling = async (req, res) => {
       });
     }
 
-    // 5. Perform Bidirectional Linking
     await Student.findByIdAndUpdate(currentStudent._id, {
       $addToSet: { linkedSiblings: targetSibling._id }
     });
@@ -193,7 +187,6 @@ export const linkSibling = async (req, res) => {
       $addToSet: { linkedSiblings: currentStudent._id }
     });
 
-    // 6. Fetch fresh linked siblings data
     const updatedStudent = await Student.findById(currentStudent._id)
       .populate('linkedSiblings', 'firstName lastName surname name currentClass assignedClass admissionNo passportPhoto');
 
@@ -227,7 +220,6 @@ export const unlinkSibling = async (req, res) => {
       return res.status(400).json({ success: false, message: "Sibling ID parameter is required." });
     }
 
-    // Find current student profile
     const currentStudent = await Student.findOne({
       $or: [{ _id: currentStudentId }, { user: currentStudentId }]
     });
@@ -236,7 +228,6 @@ export const unlinkSibling = async (req, res) => {
       return res.status(404).json({ success: false, message: "Current student account context not found." });
     }
 
-    // Bidirectional unlinking
     await Student.findByIdAndUpdate(currentStudent._id, {
       $pull: { linkedSiblings: siblingId }
     });
@@ -245,7 +236,6 @@ export const unlinkSibling = async (req, res) => {
       $pull: { linkedSiblings: currentStudent._id }
     });
 
-    // Fetch updated siblings list
     const updatedStudent = await Student.findById(currentStudent._id)
       .populate('linkedSiblings', 'firstName lastName surname name currentClass assignedClass admissionNo passportPhoto');
 
@@ -278,7 +268,6 @@ export const getStudentProfile = async (req, res) => {
       .populate('user', 'firstName lastName name email')
       .populate('linkedSiblings', 'firstName lastName surname name currentClass assignedClass admissionNo passportPhoto');
 
-    // Fallback: If no student found using user ID, search directly by student _id
     if (!student && !targetId) {
       student = await Student.findById(req.user.id)
         .populate('user', 'firstName lastName name email')
@@ -297,12 +286,12 @@ export const getStudentProfile = async (req, res) => {
     const currentSession = systemConfig.currentSession;
     const currentTerm = systemConfig.currentTerm;
 
-    const actualAdmissionSession = String(student.admittedSession || student.admissionSession || currentSession).trim();
+    const actualAdmissionSession = String(student.admittedSession || student.admissionSession || student.intakeSession || currentSession).trim();
     
-    // SMART ADMISSION TERM EXTRACTION WITH DYNAMIC SYSTEM FALLBACK
     const rawAdmittedTerm = 
       student.admissionTerm || 
       student.admittedTerm || 
+      student.intakeTerm ||
       student.enrollmentTerm || 
       student.termAdmitted || 
       student.academicTerm || 
@@ -312,14 +301,21 @@ export const getStudentProfile = async (req, res) => {
     const actualAdmissionTerm = String(rawAdmittedTerm).trim();
     const admittedTermWeight = getTermOrder(actualAdmissionTerm);
 
-    const studentNormalizedClass = normalizeClassName(student.currentClass);
-
-    // Fetch all administrative adjustments applied to this student
+    // Fetch all adjustments and result reviews for accurate historical resolution
     const adjustments = await Adjustment.find({ studentId: student._id }).lean();
+    const allStudentReviews = await ResultReview.find({ studentId: student._id }).lean();
+
+    const resolveClassForTerm = (chkSession, chkTerm) => {
+      const match = allStudentReviews.find(r => 
+        r.session === chkSession && r.term?.trim().toLowerCase() === chkTerm?.trim().toLowerCase()
+      );
+      if (match && match.className) return match.className;
+      return student.currentClass || student.assignedClass || '';
+    };
+
     const adjustmentCredits = adjustments.filter(adj => adj.type === 'Discount' || adj.type === 'Waiver');
     const adjustmentIncreases = adjustments.filter(adj => adj.type === 'Fee Increase');
-
-    const totalDiscountsWaivers = adjustmentCredits.reduce((sum, adj) => sum + adj.amount, 0);
+    const totalDiscountsWaivers = adjustmentCredits.reduce((sum, adj) => sum + (Number(adj.amount) || 0), 0);
 
     // 2. Fetch and sort ALL structures to calculate past expectations chronologically
     const allStructures = await FeeStructure.find({}).lean();
@@ -328,46 +324,50 @@ export const getStudentProfile = async (req, res) => {
     let historicalFeeItemsBreakdown = []; 
 
     allStructures.forEach(struct => {
-      if (normalizeClassName(struct.className) === studentNormalizedClass && isOlderTerm(struct.session, struct.term, currentSession, currentTerm)) {
-        
-        const structTermWeight = getTermOrder(struct.term);
-        if (actualAdmissionSession && struct.session === actualAdmissionSession && structTermWeight > 0 && structTermWeight < admittedTermWeight) {
-          return; // Skip terms prior to student enrollment
-        }
+      if (isOlderTerm(struct.session, struct.term, currentSession, currentTerm)) {
+        const historicalClass = resolveClassForTerm(struct.session, struct.term);
+        if (normalizeClassName(struct.className) === normalizeClassName(historicalClass)) {
+          const structTermWeight = getTermOrder(struct.term);
+          if (actualAdmissionSession && struct.session === actualAdmissionSession && structTermWeight > 0 && structTermWeight < admittedTermWeight) {
+            return; // Skip terms prior to student enrollment
+          }
 
-        const studentType = actualAdmissionSession === struct.session ? 'New Students' : 'Returning Students';
-        
-        struct.items?.forEach(item => {
-          if (item.checked !== false && (item.appliesTo === 'All Students' || item.appliesTo === studentType)) {
+          const studentType = actualAdmissionSession === struct.session ? 'New Students' : 'Returning Students';
+          
+          struct.items?.forEach(item => {
+            if (item.checked !== false && (item.appliesTo === 'All Students' || item.appliesTo === studentType)) {
+              historicalFeeItemsBreakdown.push({
+                name: item.name,
+                amount: Number(item.amount) || 0,
+                appliesTo: item.appliesTo,
+                term: struct.term,
+                session: struct.session
+              });
+            }
+          });
+
+          const termIncreases = adjustmentIncreases.filter(adj => adj.session === struct.session && adj.term === struct.term);
+          termIncreases.forEach(adj => {
             historicalFeeItemsBreakdown.push({
-              name: item.name,
-              amount: Number(item.amount) || 0,
-              appliesTo: item.appliesTo,
+              name: `[Fee Increase] ${adj.reason}`,
+              amount: Number(adj.amount) || 0,
+              appliesTo: 'All Students',
               term: struct.term,
               session: struct.session
             });
-          }
-        });
-
-        // Inject older term fee increases
-        const termIncreases = adjustmentIncreases.filter(adj => adj.session === struct.session && adj.term === struct.term);
-        termIncreases.forEach(adj => {
-          historicalFeeItemsBreakdown.push({
-            name: `[Fee Increase] ${adj.reason}`,
-            amount: adj.amount,
-            appliesTo: 'All Students',
-            term: struct.term,
-            session: struct.session
           });
-        });
+        }
       }
     });
 
     // 3. Current Active Term Fee Structure
+    const currentClassContext = resolveClassForTerm(currentSession, currentTerm);
+    const studentNormalizedClass = normalizeClassName(currentClassContext);
+
     const currentStructure = allStructures.find(struct => 
       normalizeClassName(struct.className) === studentNormalizedClass &&
       struct.session === currentSession &&
-      struct.term === currentTerm
+      new RegExp(`^${currentTerm.trim()}$`, 'i').test(struct.term?.trim() || '')
     );
 
     const isStructureActive = currentStructure?.status === 'Active' || currentStructure?.status === 'active';
@@ -387,12 +387,11 @@ export const getStudentProfile = async (req, res) => {
         appliesTo: item.appliesTo
       }));
 
-      // Inject active term fee increases
-      const currentIncreases = adjustmentIncreases.filter(adj => adj.session === currentSession && adj.term === currentTerm);
+      const currentIncreases = adjustmentIncreases.filter(adj => adj.session === currentSession && new RegExp(`^${currentTerm.trim()}$`, 'i').test(adj.term?.trim() || ''));
       currentIncreases.forEach(adj => {
         currentPersonalizedItems.push({
           name: `[Fee Increase] ${adj.reason}`,
-          amount: adj.amount,
+          amount: Number(adj.amount) || 0,
           appliesTo: currentStudentType
         });
       });
@@ -414,11 +413,9 @@ export const getStudentProfile = async (req, res) => {
 
     let workingCredit = totalPaid + totalDiscountsWaivers;
 
-    // A. Deduct balance from student baseline profile adjustments first
     const basePreviousOutstanding = Number(student.previousOutstanding) || 0;
     workingCredit = Math.max(0, workingCredit - basePreviousOutstanding);
 
-    // B. Deduct balance sequentially from historical breakdown rows
     const activeHistoricalBreakdown = [];
     historicalFeeItemsBreakdown.forEach(item => {
       const itemCopy = { ...item };
@@ -433,7 +430,6 @@ export const getStudentProfile = async (req, res) => {
       }
     });
 
-    // C. Deduct balance sequentially from active term items
     const activeTermBreakdown = [];
     currentPersonalizedItems.forEach(item => {
       const itemCopy = { ...item };
@@ -482,7 +478,7 @@ export const getStudentProfile = async (req, res) => {
         admissionTerm: actualAdmissionTerm,
         academicSession: currentSession, 
         academicTerm: currentTerm,       
-        currentClass: student.currentClass || "N/A",
+        currentClass: student.currentClass || "N/A", // 🟢 STRICT: Never overridden by ResultReview
         enrollmentType: studentTypeLabel,
         status: student.status || "Active",
         passportPhoto: student.passportPhoto || null,
@@ -555,10 +551,10 @@ export const getAllStudents = async (req, res) => {
     });
   } catch (error) {
     console.error("💥 Student directory fetch exception:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Internal server error gathering student directory records.",
-      error: error.message
+    return res.status(500).json({ 
+      success: false, 
+      message: "Internal server error gathering student directory records.", 
+      error: error.message 
     });
   }
 };
@@ -688,7 +684,7 @@ export const deleteStudent = async (req, res) => {
 
 /**
  * @route   PUT /api/system/config
- * @desc    Update global academic session settings
+ * @desc    Update global academic session settings and execute academic rollover
  * @access  Private (Admin Only)
  */
 export const updateSystemConfig = async (req, res) => {
@@ -702,6 +698,9 @@ export const updateSystemConfig = async (req, res) => {
       });
     }
 
+    const previousConfig = await SystemConfig.findOne({}).sort({ createdAt: -1 }).lean();
+    const isNewSession = previousConfig && previousConfig.currentSession !== currentSession;
+
     const updatedConfig = await SystemConfig.findOneAndUpdate(
       {}, 
       { 
@@ -713,9 +712,52 @@ export const updateSystemConfig = async (req, res) => {
       { new: true, upsert: true }
     );
 
+    let promotedCount = 0;
+
+    // 🟢 ACADEMIC ROLLOVER: Run promotion transitions ONLY when the academic session changes
+    if (isNewSession) {
+      const oldSession = previousConfig.currentSession;
+
+      // Find all approved Third Term reviews from the old session
+      const approvedReviews = await ResultReview.find({
+        session: oldSession,
+        term: /third/i,
+        $or: [
+          { isApprovedByExecutive: true },
+          { isApprovedByPrincipal: true },
+          { status: /approved|released|published/i }
+        ]
+      }).lean();
+
+      for (const rev of approvedReviews) {
+        if (rev.promotionDecision === 'PROMOTED' && rev.promotedToClass) {
+          await Student.findByIdAndUpdate(rev.studentId, {
+            $set: {
+              currentClass: rev.promotedToClass,
+              assignedClass: rev.promotedToClass,
+              academicSession: currentSession,
+              academicTerm: currentTerm,
+              enrollmentType: 'Returning Student'
+            }
+          });
+          promotedCount++;
+        } else if (rev.promotionDecision === 'REPEAT') {
+          await Student.findByIdAndUpdate(rev.studentId, {
+            $set: {
+              academicSession: currentSession,
+              academicTerm: currentTerm,
+              enrollmentType: 'Returning Student'
+            }
+          });
+        }
+      }
+    }
+
     return res.status(200).json({
       success: true,
-      message: "Academic settings successfully updated dynamically!",
+      message: isNewSession 
+        ? `Academic rollover to ${currentSession} completed. Processed ${promotedCount} promotions.`
+        : `Academic settings updated to ${currentTerm} (${currentSession}).`,
       config: updatedConfig
     });
   } catch (error) {
