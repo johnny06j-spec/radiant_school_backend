@@ -50,72 +50,105 @@ export const updateSystemConfig = async (req, res) => {
       });
     }
 
+    const trimmedSession = String(currentSession).trim();
+    const trimmedTerm = String(currentTerm).trim();
+
     const previousConfig = await SystemConfig.findOne({});
-    const isNewSessionRollover = previousConfig && previousConfig.currentSession !== String(currentSession).trim();
+    const isNewSessionRollover = previousConfig && previousConfig.currentSession !== trimmedSession;
 
     // 1. Update system config
     const updatedConfig = await SystemConfig.findOneAndUpdate(
       {},
       { 
         $set: { 
-          currentSession: String(currentSession).trim(), 
-          currentTerm: String(currentTerm).trim() 
+          currentSession: trimmedSession, 
+          currentTerm: trimmedTerm 
         } 
       },
       { new: true, upsert: true, runValidators: true }
     );
 
     let promotedCount = 0;
+    let repeatCount = 0;
 
-    // 2. Automated Class Promotion on Session Advance (e.g. from 2026/2027 -> 2027/2028)
+    // 2. Automated Class Promotion ONLY on Academic Session Advance (e.g., 2026/2027 -> 2027/2028)
     if (isNewSessionRollover) {
       const pastSession = previousConfig.currentSession;
       
-      // Fetch all approved Third Term reviews from the concluding session
-      const approvedThirdTermReviews = await ResultReview.find({
+      // Fetch all approved/published Third Term reviews from the concluding session
+      const approvedReviews = await ResultReview.find({
         session: pastSession,
         term: /third/i,
-        promotionDecision: 'PROMOTED',
-        promotedToClass: { $exists: true, $ne: '' }
+        $or: [
+          { isApprovedByExecutive: true },
+          { isApprovedByPrincipal: true },
+          { status: /approved|released|published/i }
+        ]
       }).lean();
 
-      for (const review of approvedThirdTermReviews) {
+      for (const review of approvedReviews) {
         if (!review.studentId) continue;
 
-        const nextClass = review.promotedToClass.trim();
-        const isGraduating = /graduate/i.test(nextClass);
+        const isPromoted = review.promotionDecision === 'PROMOTED' && review.promotedToClass;
+        const isRepeat = review.promotionDecision === 'REPEAT';
 
-        const updatePayload = {
-          currentClass: nextClass,
-          assignedClass: nextClass,
-          status: isGraduating ? 'Graduated' : 'Active'
-        };
+        if (isPromoted) {
+          const nextClass = review.promotedToClass.trim();
+          const isGraduating = /graduate/i.test(nextClass);
 
-        const updatedStudent = await Student.findByIdAndUpdate(
-          review.studentId,
-          { $set: updatePayload },
-          { new: true }
-        );
+          const studentUpdate = {
+            currentClass: nextClass,
+            assignedClass: nextClass,
+            academicSession: trimmedSession,
+            academicTerm: trimmedTerm,
+            enrollmentType: 'Returning Student',
+            status: isGraduating ? 'Graduated' : 'Active'
+          };
 
-        if (updatedStudent && updatedStudent.user) {
-          await User.findByIdAndUpdate(updatedStudent.user, {
-            $set: { assignedClass: nextClass, status: isGraduating ? 'Graduated' : 'Active' }
-          });
+          const updatedStudent = await Student.findByIdAndUpdate(
+            review.studentId,
+            { $set: studentUpdate },
+            { new: true }
+          );
+
+          if (updatedStudent?.user) {
+            await User.findByIdAndUpdate(updatedStudent.user, {
+              $set: { 
+                assignedClass: nextClass, 
+                status: isGraduating ? 'Graduated' : 'Active' 
+              }
+            });
+          }
+
+          promotedCount++;
+        } else if (isRepeat) {
+          // Repeating student remains in their current class, updated for the new session
+          await Student.findByIdAndUpdate(
+            review.studentId,
+            { 
+              $set: { 
+                academicSession: trimmedSession,
+                academicTerm: trimmedTerm,
+                enrollmentType: 'Returning Student'
+              } 
+            }
+          );
+          repeatCount++;
         }
-
-        promotedCount++;
       }
     }
 
-    const promoMessage = promotedCount > 0 
-      ? ` and promoted ${promotedCount} students to their new class tiers!` 
-      : '!';
+    let message = `Academic settings updated to ${updatedConfig.currentSession} (${updatedConfig.currentTerm}).`;
+    if (promotedCount > 0 || repeatCount > 0) {
+      message += ` Rollover complete: ${promotedCount} promoted, ${repeatCount} repeated.`;
+    }
 
     return res.status(200).json({
       success: true,
-      message: `Academic settings updated to ${updatedConfig.currentSession} (${updatedConfig.currentTerm})${promoMessage}`,
+      message,
       data: updatedConfig,
-      promotedStudentsCount: promotedCount
+      promotedStudentsCount: promotedCount,
+      repeatedStudentsCount: repeatCount
     });
 
   } catch (error) {
