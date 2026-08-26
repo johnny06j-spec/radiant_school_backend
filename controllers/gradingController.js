@@ -10,6 +10,7 @@ const normalizeName = (nameStr) => {
 /**
  * @route   GET /api/teachers/fetch-grid
  * @desc    Fetch grading grid sheet and sync against live student roster (purges deleted students)
+ * @access  Private (Teacher/Staff)
  */
 export const fetchGradingGrid = async (req, res) => {
   try {
@@ -26,6 +27,8 @@ export const fetchGradingGrid = async (req, res) => {
 
     const cleanClass = className.trim();
     const cleanSubject = subjectName.trim();
+    const classPattern = cleanClass.replace(/\s+/g, '\\s*');
+    const classRegex = new RegExp(`^${classPattern}$`, 'i');
 
     // 1. Calculate Previous Term for Brought Forward (BF) Scores
     let previousTerm = null;
@@ -37,8 +40,8 @@ export const fetchGradingGrid = async (req, res) => {
 
     if (previousTerm) {
       const prevGrid = await GradingGrid.findOne({
-        className: cleanClass,
-        subjectName: cleanSubject,
+        className: classRegex,
+        subjectName: new RegExp(`^${cleanSubject.replace(/\s+/g, '\\s*')}$`, 'i'),
         term: previousTerm,
         session
       }).lean();
@@ -62,10 +65,7 @@ export const fetchGradingGrid = async (req, res) => {
       return prevScoreById[cleanId] ?? prevScoreById[cleanAdm] ?? prevScoreByName[cleanName] ?? 0;
     };
 
-    // 2. Fetch Live Active Students Enrolled in Class
-    const classPattern = cleanClass.replace(/\s+/g, '\\s*');
-    const classRegex = new RegExp(`^${classPattern}$`, 'i');
-
+    // 2. Fetch Live Active Students Enrolled strictly in this Class
     const currentEnrolledStudents = await Student.find({
       $or: [
         { currentClass: classRegex },
@@ -86,11 +86,12 @@ export const fetchGradingGrid = async (req, res) => {
       currentEnrolledStudents.map(s => normalizeName(s.name || `${s.surname || ''} ${s.firstname || s.firstName || ''}`))
     );
 
+    // 🟢 LOCK CHECK MUST BE STRICTLY SCOPED TO EXACT className, subjectName, term, AND session
     let grid = await GradingGrid.findOne({
-      className: cleanClass,
-      subjectName: cleanSubject,
-      term,
-      session
+      className: classRegex,
+      subjectName: new RegExp(`^${cleanSubject.replace(/\s+/g, '\\s*')}$`, 'i'),
+      term: term.trim(),
+      session: session.trim()
     });
 
     // 3. Initialize or Sync Grid
@@ -127,13 +128,12 @@ export const fetchGradingGrid = async (req, res) => {
       const seenIds = new Set();
       const uniqueSavedScores = [];
 
-      // 🟢 STEP A: Keep only saved score rows belonging to STILL-EXISTING active students
+      // STEP A: Keep only saved score rows belonging to STILL-EXISTING active students
       grid.studentsScores.forEach(row => {
         const rowIdStr = (row.studentId || row.id || '').toString();
         const rowAdmStr = (row.admissionNo || '').toString().trim().toUpperCase();
         const rowNormName = normalizeName(row.name || '');
 
-        // Verify that this row matches an existing live student
         const isStillEnrolled = 
           (rowIdStr && activeStudentIds.has(rowIdStr)) ||
           (rowAdmStr && activeAdmissions.has(rowAdmStr)) ||
@@ -152,7 +152,7 @@ export const fetchGradingGrid = async (req, res) => {
         }
       });
 
-      // 🟢 STEP B: Append any NEWLY ENROLLED students not yet in the saved grid
+      // STEP B: Append any NEWLY ENROLLED students not yet in the saved grid
       currentEnrolledStudents.forEach(student => {
         const studentFullName = student.name 
           ? student.name 
@@ -190,7 +190,17 @@ export const fetchGradingGrid = async (req, res) => {
       grid.studentsScores = uniqueSavedScores;
     }
 
-    return res.status(200).json({ success: true, data: grid });
+    const isLocked = grid.status === 'Submitted' || 
+                     grid.status === 'Submitted for Review' || 
+                     grid.status === 'Approved' || 
+                     grid.status === 'Released';
+
+    return res.status(200).json({ 
+      success: true, 
+      data: grid,
+      isLocked,
+      status: grid.status || 'Draft'
+    });
 
   } catch (error) {
     console.error("💥 Error fetching grading grid:", error);
@@ -205,6 +215,7 @@ export const fetchGradingGrid = async (req, res) => {
 /**
  * @route   POST /api/teachers/save-grid
  * @desc    Save grading grid draft (strips deleted students before saving)
+ * @access  Private (Teacher/Staff)
  */
 export const saveGradingGridDraft = async (req, res) => {
   try {
@@ -255,14 +266,19 @@ export const saveGradingGridDraft = async (req, res) => {
       .filter(Boolean);
 
     const updatedGrid = await GradingGrid.findOneAndUpdate(
-      { className: cleanClass, subjectName: subjectName.trim(), term, session },
+      { 
+        className: classRegex, 
+        subjectName: new RegExp(`^${subjectName.trim().replace(/\s+/g, '\\s*')}$`, 'i'), 
+        term: term.trim(), 
+        session: session.trim() 
+      },
       {
         $set: {
           className: cleanClass,
           schoolSection,
           subjectName: subjectName.trim(),
-          term,
-          session,
+          term: term.trim(),
+          session: session.trim(),
           studentsScores: sanitizedScores,
           status: 'Draft',
           updatedAt: new Date()
@@ -282,6 +298,52 @@ export const saveGradingGridDraft = async (req, res) => {
     return res.status(500).json({
       success: false,
       message: "Failed to persist draft scores into database.",
+      error: error.message
+    });
+  }
+};
+
+/**
+ * @route   POST /api/teachers/submit-broadsheet
+ * @desc    Submit result broadsheet to Principal / Executive for review (locks the specific class)
+ * @access  Private (Teacher/Staff)
+ */
+export const submitBroadsheetToPrincipal = async (req, res) => {
+  try {
+    const { className, term, session } = req.body;
+
+    if (!className || !term || !session) {
+      return res.status(400).json({
+        success: false,
+        message: "Missing required parameters: className, term, and session."
+      });
+    }
+
+    const cleanClass = className.trim();
+    const classRegex = new RegExp(`^${cleanClass.replace(/\s+/g, '\\s*')}$`, 'i');
+
+    // 🟢 ONLY UPDATE GRIDS BELONGING TO THIS SPECIFIC CLASS
+    const updateResult = await GradingGrid.updateMany(
+      { 
+        className: classRegex, 
+        term: term.trim(), 
+        session: session.trim() 
+      },
+      { 
+        $set: { status: 'Submitted for Review', updatedAt: new Date() } 
+      }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: `Broadsheet for ${cleanClass} (${term}, ${session}) successfully submitted for Principal approval!`,
+      modifiedCount: updateResult.modifiedCount
+    });
+  } catch (error) {
+    console.error("💥 Error submitting broadsheet for review:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Failed to submit class broadsheet for approval review.",
       error: error.message
     });
   }
