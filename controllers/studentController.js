@@ -399,8 +399,11 @@ export const getStudentProfile = async (req, res) => {
       rawCurrentTermFee = currentPersonalizedItems.reduce((sum, item) => sum + item.amount, 0);
     }
 
-    // 4. Fetch payments and reconcile working credit baseline pool
-    const paymentLogs = await Payment.find({ studentId: student._id, status: 'Successful' }).lean();
+    // 🟢 4. Fetch ALL successful payments sorted chronologically without term restrictions
+    const paymentLogs = await Payment.find({ studentId: student._id, status: 'Successful' })
+      .sort({ createdAt: -1 })
+      .lean();
+      
     const totalPaid = paymentLogs.reduce((sum, payment) => sum + (Number(payment.amountPaid) || 0), 0);
     
     const paymentsHistory = paymentLogs.map(p => ({
