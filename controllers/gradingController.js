@@ -1,6 +1,10 @@
 // controllers/gradingController.js
 import Student from '../models/Student.js';
 import GradingGrid from '../models/GradingGrid.js';
+import FeeStructure from '../models/FeeStructure.js';
+import Payment from '../models/Payment.js';
+import Adjustment from '../models/Adjustment.js';
+import ResultReview from '../models/ResultReview.js';
 
 const normalizeName = (nameStr) => {
   if (!nameStr) return '';
@@ -346,5 +350,115 @@ export const submitBroadsheetToPrincipal = async (req, res) => {
       message: "Failed to submit class broadsheet for approval review.",
       error: error.message
     });
+  }
+};
+
+/**
+ * @route   GET /api/teachers/my-results/:studentId
+ * @desc    Fetch student term result card and verify financial clearance
+ * @access  Private (Student/Parent)
+ */
+export const getMyResults = async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const { term, session } = req.query;
+
+    const student = await Student.findById(studentId);
+    if (!student) {
+      return res.status(404).json({ success: false, message: "Student record profile not found." });
+    }
+
+    const selectedTerm = (term || "First Term").trim();
+    const selectedSession = (session || "2026/2027").trim();
+
+    // 1. Fetch ResultReview record
+    const review = await ResultReview.findOne({
+      studentId: student._id,
+      session: selectedSession,
+      term: new RegExp(`^${selectedTerm}$`, 'i')
+    }).lean();
+
+    const isReleased = review?.status === 'Released' || review?.isPublished || review?.isApprovedByExecutive;
+
+    if (!isReleased) {
+      return res.status(200).json({
+        success: true,
+        isReleased: false,
+        isCleared: true,
+        outstandingBalance: 0,
+        message: `Continuous assessment sheets for ${selectedTerm} (${selectedSession}) are undergoing administrative verification.`
+      });
+    }
+
+    // 2. 🟢 CUMULATIVE FINANCIAL CLEARANCE CALCULATION (UP TO TARGET TERM)
+    const basePreviousOutstanding = Number(student.previousOutstanding) || 0;
+
+    const allStructures = await FeeStructure.find({}).lean();
+    allStructures.sort((a, b) => {
+      const yearA = parseInt(a.session?.match(/^\d{4}/)?.[1] || 0, 10);
+      const yearB = parseInt(b.session?.match(/^\d{4}/)?.[1] || 0, 10);
+      if (yearA !== yearB) return yearA - yearB;
+      
+      const getTermOrder = (t) => /first|1st/i.test(t) ? 1 : /second|2nd/i.test(t) ? 2 : /third|3rd/i.test(t) ? 3 : 0;
+      return getTermOrder(a.term) - getTermOrder(b.term);
+    });
+
+    const targetYear = parseInt(selectedSession.match(/^\d{4}/)?.[1] || 0, 10);
+    const getTermOrder = (t) => /first|1st/i.test(t) ? 1 : /second|2nd/i.test(t) ? 2 : /third|3rd/i.test(t) ? 3 : 0;
+    const targetTermOrder = getTermOrder(selectedTerm);
+
+    let cumulativeFeesExpected = basePreviousOutstanding;
+
+    allStructures.forEach(struct => {
+      const structYear = parseInt(struct.session?.match(/^\d{4}/)?.[1] || 0, 10);
+      const structTermOrder = getTermOrder(struct.term);
+
+      const isUpToTarget = structYear < targetYear || (structYear === targetYear && structTermOrder <= targetTermOrder);
+
+      if (isUpToTarget) {
+        const studentClass = (student.currentClass || student.assignedClass || '').trim().toUpperCase();
+        const structClass = (struct.className || '').trim().toUpperCase();
+
+        if (structClass === studentClass || structClass.replace(/\s+/g, '') === studentClass.replace(/\s+/g, '')) {
+          struct.items?.forEach(item => {
+            if (item.checked !== false) {
+              cumulativeFeesExpected += Number(item.amount) || 0;
+            }
+          });
+        }
+      }
+    });
+
+    const adjustments = await Adjustment.find({ studentId: student._id }).lean();
+    
+    adjustments.forEach(adj => {
+      const adjYear = parseInt((adj.session || selectedSession).match(/^\d{4}/)?.[1] || 0, 10);
+      const adjTermOrder = getTermOrder(adj.term || selectedTerm);
+      const isUpToTarget = adjYear < targetYear || (adjYear === targetYear && adjTermOrder <= targetTermOrder);
+
+      if (isUpToTarget) {
+        const amt = Number(adj.amount) || 0;
+        if (adj.type === 'Fee Increase') cumulativeFeesExpected += amt;
+        if (adj.type === 'Discount' || adj.type === 'Waiver') cumulativeFeesExpected -= amt;
+      }
+    });
+
+    const payments = await Payment.find({ studentId: student._id, status: 'Successful' }).lean();
+    const totalPaid = payments.reduce((sum, p) => sum + (Number(p.amountPaid) || 0), 0);
+
+    const cumulativeOutstanding = Math.max(0, cumulativeFeesExpected - totalPaid);
+    const isCleared = cumulativeOutstanding <= 0;
+
+    return res.status(200).json({
+      success: true,
+      isReleased: true,
+      isCleared,
+      outstandingBalance: cumulativeOutstanding,
+      data: review
+    });
+
+  } catch (error) {
+    console.error("💥 Error fetching student result access:", error);
+    return res.status(500).json({ success: false, message: "Error verifying result access clearance.", error: error.message });
   }
 };
