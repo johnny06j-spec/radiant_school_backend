@@ -150,7 +150,11 @@ export const getStudentLedger = async (req, res) => {
 
     const currentExpected = currentPersonalizedItems.reduce((sum, item) => sum + item.amount, 0);
 
-    const allSuccessfulPayments = await Payment.find({ studentId, status: 'Successful' }).lean();
+    // 🟢 FETCH ALL SUCCESSFUL PAYMENTS CHRONOLOGICALLY
+    const allSuccessfulPayments = await Payment.find({ studentId: student._id, status: 'Successful' })
+      .sort({ createdAt: -1 })
+      .lean();
+
     const aggregatePaidAllTime = allSuccessfulPayments.reduce((sum, log) => sum + (Number(log.amountPaid) || 0), 0);
     const basePreviousOutstanding = Number(student.previousOutstanding) || 0;
 
@@ -179,7 +183,8 @@ export const getStudentLedger = async (req, res) => {
         student: { ...student.toObject(), currentClass: currentClassContext },
         studentType: currentStudentType,
         items: isStructureActive ? currentPersonalizedItems : [],
-        paymentHistory: allSuccessfulPayments.filter(p => p.session === session && targetTermRegex.test(p.term?.trim() || '')),
+        // 🟢 RETURN FULL PAYMENT HISTORY FOR THE LEDGER RECEIPT TABLE
+        paymentHistory: allSuccessfulPayments,
         currentTermFee: finalCurrentExpected,
         totalPaid: aggregatePaidAllTime,
         currentTermAllocatedCredit,
