@@ -65,7 +65,9 @@ export const downloadStudentResultPdf = async (req, res) => {
 
     const activeTerm = term || review?.term || 'Second Term';
     const activeSession = session || review?.session || '2026/2027';
-    const activeClass = className || review?.className || studentDoc?.currentClass || 'KG 1';
+    
+    // Prioritize review.className so historical PDFs display the actual historical class
+    const activeClass = className || review?.className || studentDoc?.assignedClass || studentDoc?.currentClass || 'KG 1';
 
     const isPrimary = !['JSS', 'SSS'].some(sec => activeClass.toUpperCase().includes(sec));
     const isFirstTerm = activeTerm.toUpperCase().includes('FIRST') || activeTerm.toUpperCase().includes('1ST');
@@ -246,7 +248,7 @@ export const downloadStudentResultPdf = async (req, res) => {
 
 /**
  * @route   GET /api/teachers/my-results/:studentId
- * @desc    Fetch released results for student portal with automated cumulative financial gate
+ * @desc    Fetch released results for student portal with automated global live debt gate
  */
 export const getStudentPortalResults = async (req, res) => {
   try {
@@ -284,71 +286,47 @@ export const getStudentPortalResults = async (req, res) => {
       });
     }
 
-    // 🟢 CUMULATIVE FINANCIAL CLEARANCE CALCULATION UP TO TARGET TERM
+    // 🟢 STRICT GLOBAL ACTIVE DEBT GATE: Check total live debt across all terms/sessions
     const basePreviousOutstanding = Number(student.previousOutstanding) || 0;
-
     const allStructures = await FeeStructure.find({}).lean();
-    const studentClass = normalizeClassName(student.currentClass || student.assignedClass || '');
 
-    // Sort structures chronologically
-    allStructures.sort((a, b) => {
-      const yearA = getSessionStartYear(a.session);
-      const yearB = getSessionStartYear(b.session);
-      if (yearA !== yearB) return yearA - yearB;
-      return getTermOrder(a.term) - getTermOrder(b.term);
-    });
+    let totalGlobalFeesExpected = basePreviousOutstanding;
 
-    const targetYear = getSessionStartYear(activeSession);
-    const targetTermOrder = getTermOrder(activeTerm);
-
-    let cumulativeFeesExpected = basePreviousOutstanding;
-
-    // Sum all applicable fee structures chronologically up to selected term
+    // Aggregate all historical & current expectations across all active fee structures
     allStructures.forEach(struct => {
-      const structYear = getSessionStartYear(struct.session);
-      const structTermOrder = getTermOrder(struct.term);
+      const intakeSession = String(student.intakeSession || student.admittedSession || student.admissionSession || '').trim();
+      const studentType = intakeSession === struct.session ? 'New Students' : 'Returning Students';
 
-      const isUpToTarget = structYear < targetYear || (structYear === targetYear && structTermOrder <= targetTermOrder);
-
-      if (isUpToTarget && normalizeClassName(struct.className) === studentClass) {
-        const intakeSession = String(student.intakeSession || student.admittedSession || student.admissionSession || '').trim();
-        const studentType = intakeSession === struct.session ? 'New Students' : 'Returning Students';
-
-        struct.items?.forEach(item => {
-          if (item.checked !== false && (item.appliesTo === 'All Students' || item.appliesTo === studentType)) {
-            cumulativeFeesExpected += Number(item.amount) || 0;
-          }
-        });
-      }
+      struct.items?.forEach(item => {
+        if (item.checked !== false && (item.appliesTo === 'All Students' || item.appliesTo === studentType)) {
+          totalGlobalFeesExpected += Number(item.amount) || 0;
+        }
+      });
     });
 
-    // Sum adjustments up to selected term
+    // Aggregate all financial adjustments (increases/discounts)
     const adjustments = await Adjustment.find({ studentId: student._id }).lean();
     adjustments.forEach(adj => {
-      const adjYear = getSessionStartYear(adj.session || activeSession);
-      const adjTermOrder = getTermOrder(adj.term || activeTerm);
-      const isUpToTarget = adjYear < targetYear || (adjYear === targetYear && adjTermOrder <= targetTermOrder);
-
-      if (isUpToTarget) {
-        const amt = Number(adj.amount) || 0;
-        if (adj.type === 'Fee Increase') cumulativeFeesExpected += amt;
-        if (adj.type === 'Discount' || adj.type === 'Waiver') cumulativeFeesExpected -= amt;
-      }
+      const amt = Number(adj.amount) || 0;
+      if (adj.type === 'Fee Increase') totalGlobalFeesExpected += amt;
+      if (adj.type === 'Discount' || adj.type === 'Waiver') totalGlobalFeesExpected -= amt;
     });
 
-    // Subtract all successful payments
+    // Aggregate all-time successful payments
     const successfulPayments = await Payment.find({ studentId: student._id, status: 'Successful' }).lean();
-    const totalPaid = successfulPayments.reduce((sum, p) => sum + (Number(p.amountPaid) || 0), 0);
+    const totalPaidAllTime = successfulPayments.reduce((sum, p) => sum + (Number(p.amountPaid) || 0), 0);
 
-    const outstandingBalance = Math.max(0, cumulativeFeesExpected - totalPaid);
+    // Calculate live active global balance
+    const activeGlobalDebt = Math.max(0, totalGlobalFeesExpected - totalPaidAllTime);
 
-    if (outstandingBalance > 0) {
+    // If the student owes ANY money anywhere on their account, lock ALL report cards
+    if (activeGlobalDebt > 0) {
       return res.status(200).json({
         success: true,
         isReleased: true,
         isCleared: false,
-        outstandingBalance,
-        message: "Financial restriction active. Please clear outstanding fees to view your report card."
+        outstandingBalance: activeGlobalDebt,
+        message: "Financial restriction active. Student has an uncleared account balance."
       });
     }
 
