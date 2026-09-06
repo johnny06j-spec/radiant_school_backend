@@ -25,6 +25,27 @@ const getBase64Image = (relativePath) => {
 };
 
 /**
+ * Helper to extract starting year from session string (e.g., "2026/2027" -> 2026)
+ */
+const getSessionStartYear = (sessionStr) => {
+  if (!sessionStr) return 0;
+  const match = String(sessionStr).match(/^(\d{4})/);
+  return match ? parseInt(match[1], 10) : 0;
+};
+
+/**
+ * Helper to determine term chronological weight
+ */
+const getTermOrder = (termName) => {
+  if (!termName) return 0;
+  const normalized = String(termName).trim().toLowerCase();
+  if (normalized.includes('first') || normalized.includes('1st')) return 1;
+  if (normalized.includes('second') || normalized.includes('2nd')) return 2;
+  if (normalized.includes('third') || normalized.includes('3rd')) return 3;
+  return 0;
+};
+
+/**
  * @route   GET /api/teachers/download-result-pdf/:studentId
  * @desc    Generate printable report card matching the Headmaster/Principal signed-off data
  */
@@ -225,7 +246,7 @@ export const downloadStudentResultPdf = async (req, res) => {
 
 /**
  * @route   GET /api/teachers/my-results/:studentId
- * @desc    Fetch released results for student portal with automated financial gate
+ * @desc    Fetch released results for student portal with automated cumulative financial gate
  */
 export const getStudentPortalResults = async (req, res) => {
   try {
@@ -244,10 +265,14 @@ export const getStudentPortalResults = async (req, res) => {
     if (!student) return res.status(404).json({ success: false, message: "Student record not found." });
 
     const review = await ResultReview.findOne({
-      studentId,
-      term: activeTerm,
-      session: activeSession,
-      status: 'Released'
+      studentId: student._id,
+      term: new RegExp(`^${activeTerm.trim()}$`, 'i'),
+      session: activeSession.trim(),
+      $or: [
+        { status: 'Released' },
+        { isPublished: true },
+        { isApprovedByExecutive: true }
+      ]
     }).lean();
 
     if (!review) {
@@ -259,40 +284,63 @@ export const getStudentPortalResults = async (req, res) => {
       });
     }
 
-    // Financial clearance check
+    // 🟢 CUMULATIVE FINANCIAL CLEARANCE CALCULATION UP TO TARGET TERM
+    const basePreviousOutstanding = Number(student.previousOutstanding) || 0;
+
     const allStructures = await FeeStructure.find({}).lean();
     const studentClass = normalizeClassName(student.currentClass || student.assignedClass || '');
-    
-    const currentStructure = allStructures.find(struct => 
-      normalizeClassName(struct.className) === studentClass &&
-      struct.session === activeSession &&
-      struct.term === activeTerm
-    );
 
-    let expectedFee = 0;
-    if (currentStructure?.items) {
-      const intakeSession = String(student.intakeSession || student.admittedSession || '').trim();
-      const studentType = intakeSession === activeSession ? 'New Students' : 'Returning Students';
-      
-      currentStructure.items.forEach(item => {
-        if (item.checked !== false && (item.appliesTo === 'All Students' || item.appliesTo === studentType)) {
-          expectedFee += Number(item.amount) || 0;
-        }
-      });
-    }
-
-    const adjustments = await Adjustment.find({ studentId: student._id, session: activeSession, term: activeTerm }).lean();
-    adjustments.forEach(adj => {
-      if (adj.type === 'Fee Increase') expectedFee += Number(adj.amount) || 0;
-      if (adj.type === 'Discount' || adj.type === 'Waiver') expectedFee -= Number(adj.amount) || 0;
+    // Sort structures chronologically
+    allStructures.sort((a, b) => {
+      const yearA = getSessionStartYear(a.session);
+      const yearB = getSessionStartYear(b.session);
+      if (yearA !== yearB) return yearA - yearB;
+      return getTermOrder(a.term) - getTermOrder(b.term);
     });
 
+    const targetYear = getSessionStartYear(activeSession);
+    const targetTermOrder = getTermOrder(activeTerm);
+
+    let cumulativeFeesExpected = basePreviousOutstanding;
+
+    // Sum all applicable fee structures chronologically up to selected term
+    allStructures.forEach(struct => {
+      const structYear = getSessionStartYear(struct.session);
+      const structTermOrder = getTermOrder(struct.term);
+
+      const isUpToTarget = structYear < targetYear || (structYear === targetYear && structTermOrder <= targetTermOrder);
+
+      if (isUpToTarget && normalizeClassName(struct.className) === studentClass) {
+        const intakeSession = String(student.intakeSession || student.admittedSession || student.admissionSession || '').trim();
+        const studentType = intakeSession === struct.session ? 'New Students' : 'Returning Students';
+
+        struct.items?.forEach(item => {
+          if (item.checked !== false && (item.appliesTo === 'All Students' || item.appliesTo === studentType)) {
+            cumulativeFeesExpected += Number(item.amount) || 0;
+          }
+        });
+      }
+    });
+
+    // Sum adjustments up to selected term
+    const adjustments = await Adjustment.find({ studentId: student._id }).lean();
+    adjustments.forEach(adj => {
+      const adjYear = getSessionStartYear(adj.session || activeSession);
+      const adjTermOrder = getTermOrder(adj.term || activeTerm);
+      const isUpToTarget = adjYear < targetYear || (adjYear === targetYear && adjTermOrder <= targetTermOrder);
+
+      if (isUpToTarget) {
+        const amt = Number(adj.amount) || 0;
+        if (adj.type === 'Fee Increase') cumulativeFeesExpected += amt;
+        if (adj.type === 'Discount' || adj.type === 'Waiver') cumulativeFeesExpected -= amt;
+      }
+    });
+
+    // Subtract all successful payments
     const successfulPayments = await Payment.find({ studentId: student._id, status: 'Successful' }).lean();
     const totalPaid = successfulPayments.reduce((sum, p) => sum + (Number(p.amountPaid) || 0), 0);
-    const previousOutstanding = Number(student.previousOutstanding) || 0;
 
-    const totalBill = expectedFee + previousOutstanding;
-    const outstandingBalance = Math.max(0, totalBill - totalPaid);
+    const outstandingBalance = Math.max(0, cumulativeFeesExpected - totalPaid);
 
     if (outstandingBalance > 0) {
       return res.status(200).json({
