@@ -467,6 +467,9 @@ export const getStudentProfile = async (req, res) => {
     const isNewStudent = admissionYear >= activeYear;
     const studentTypeLabel = isNewStudent ? 'New Student' : 'Returning Student';
 
+    // Dynamic class resolution for the active timeline context
+    const resolvedClassForView = resolveClassForTerm(currentSession, currentTerm) || student.currentClass || "N/A";
+
     return res.status(200).json({
       success: true,
       student: {
@@ -481,7 +484,7 @@ export const getStudentProfile = async (req, res) => {
         admissionTerm: actualAdmissionTerm,
         academicSession: currentSession, 
         academicTerm: currentTerm,       
-        currentClass: student.currentClass || "N/A", // 🟢 STRICT: Never overridden by ResultReview
+        currentClass: resolvedClassForView, // 🟢 Dynamically matches historical class if viewing an older session
         enrollmentType: studentTypeLabel,
         status: student.status || "Active",
         passportPhoto: student.passportPhoto || null,
