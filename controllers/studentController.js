@@ -595,17 +595,16 @@ export const getStudentById = async (req, res) => {
 
 /**
  * @route   PUT /api/students/:id
- * @desc    Update an existing student safely without crashing on null or missing document references
+ * @desc    Update an existing student document using instance .save() with bulletproof fallback checks
  * @access  Private (Admin)
  */
 export const updateStudent = async (req, res) => {
   try {
     const studentId = req.params.id;
-    let updateData = { ...req.body };
 
     // 1. Safe Document Lookup First
-    const currentStudent = await Student.findById(studentId);
-    if (!currentStudent) {
+    const student = await Student.findById(studentId);
+    if (!student) {
       return res.status(404).json({ 
         success: false, 
         message: "Student record targeted for update was not found." 
@@ -615,43 +614,49 @@ export const updateStudent = async (req, res) => {
     const systemConfig = await getSystemConfig();
     const activeTerm = systemConfig?.currentTerm || "First Term";
 
-    // 2. Safely reconstruct the display name
-    if (req.body.firstName !== undefined || req.body.surname !== undefined || req.body.otherName !== undefined) {
-      const first = req.body.firstName !== undefined ? req.body.firstName : (currentStudent?.firstName || '');
-      const sur = req.body.surname !== undefined ? req.body.surname : (currentStudent?.surname || '');
-      const other = req.body.otherName !== undefined ? req.body.otherName : (currentStudent?.otherName || '');
-      
-      updateData.name = `${String(first).trim()} ${String(sur).trim()} ${String(other).trim()}`
-        .replace(/\s+/g, ' ')
-        .trim();
-    }
+    // 2. Extract inputs from request body
+    const {
+      firstName,
+      surname,
+      otherName,
+      gender,
+      email,
+      admissionTerm,
+      admittedTerm,
+      ...restBody
+    } = req.body;
 
-    if (req.body.gender) {
-      updateData.gender = String(req.body.gender).trim();
-    }
+    // 3. Update field properties safely with strict string checking
+    if (firstName !== undefined && firstName !== null) student.firstName = String(firstName).trim();
+    if (surname !== undefined && surname !== null) student.surname = String(surname).trim();
+    if (otherName !== undefined && otherName !== null) student.otherName = String(otherName).trim();
+    if (gender !== undefined && gender !== null) student.gender = String(gender).trim();
+    if (email !== undefined && email !== null) student.email = String(email).toLowerCase().trim();
+
+    // 4. Safely reconstruct the display name without throwing undefined errors
+    const first = student.firstName || (firstName ? String(firstName) : '') || '';
+    const sur = student.surname || (surname ? String(surname) : '') || '';
+    const other = student.otherName || (otherName ? String(otherName) : '') || '';
+    
+    student.name = `${first} ${sur} ${other}`.replace(/\s+/g, ' ').trim();
 
     if (req.file && req.file.path) {
-      updateData.passportPhoto = req.file.path;
+      student.passportPhoto = req.file.path;
     }
 
-    if (!updateData.admissionTerm && !updateData.admittedTerm) {
-      updateData.admissionTerm = activeTerm;
-      updateData.admittedTerm = activeTerm;
+    if (!student.admissionTerm && !student.admittedTerm) {
+      student.admissionTerm = activeTerm;
+      student.admittedTerm = activeTerm;
     }
 
-    if (updateData.email) {
-      updateData.email = String(updateData.email).toLowerCase().trim();
-    }
+    // Assign rest of fields from body dynamically
+    Object.assign(student, restBody);
 
-    // 3. Perform update safely
-    const updatedStudent = await Student.findByIdAndUpdate(
-      studentId,
-      { $set: updateData },
-      { new: true, runValidators: true }
-    );
+    // 5. Save document (runs pre-save middleware cleanly)
+    const updatedStudent = await student.save();
 
-    // 4. Sync linked auth user account
-    if (updatedStudent?.user) {
+    // 6. Sync linked auth User account if present
+    if (updatedStudent.user) {
       await User.findByIdAndUpdate(updatedStudent.user, {
         $set: {
           name: updatedStudent.name,
