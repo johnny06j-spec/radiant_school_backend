@@ -4,6 +4,9 @@ import mongoose from 'mongoose';
 const studentSchema = new mongoose.Schema({
   user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   name: { type: String, required: true, uppercase: true },
+  surname: { type: String, trim: true },
+  firstName: { type: String, trim: true },
+  otherName: { type: String, trim: true },
   admissionNo: { type: String, required: true, unique: true },
   currentClass: { type: String, required: true },
 
@@ -42,7 +45,7 @@ const studentSchema = new mongoose.Schema({
     enum: ['Male', 'Female', 'Not Specified'],
     default: 'Not Specified'
   },
-  dob: { type: String, default: "Not Specified" },
+  dob: { type: Schema.Types.Mixed, default: "Not Specified" },
   email: { type: String, required: true, unique: true },
   phone: { type: String },
   stateOfOrigin: { type: String },
@@ -64,8 +67,8 @@ const studentSchema = new mongoose.Schema({
   status: { type: String, default: "Active" }
 }, { timestamps: true });
 
-// 🟢 Pre-save middleware cleanly synchronizes intake aliases without invoking next()
-studentSchema.pre('save', function () {
+// 🟢 Pre-save middleware cleanly synchronizes intake aliases
+studentSchema.pre('save', function (next) {
   if (this.intakeSession) {
     if (!this.admittedSession) this.admittedSession = this.intakeSession;
     if (!this.admissionSession) this.admissionSession = this.intakeSession;
@@ -74,6 +77,7 @@ studentSchema.pre('save', function () {
     if (!this.admittedTerm) this.admittedTerm = this.intakeTerm;
     if (!this.admissionTerm) this.admissionTerm = this.intakeTerm;
   }
+  if (typeof next === 'function') next();
 });
 
 export default mongoose.model('Student', studentSchema);
