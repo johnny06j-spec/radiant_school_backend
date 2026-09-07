@@ -13,7 +13,7 @@ import bcrypt from 'bcryptjs';
  */
 const getSessionStartYear = (sessionStr) => {
   if (!sessionStr) return 0;
-  const match = sessionStr.match(/^(\d{4})/);
+  const match = String(sessionStr).match(/^(\d{4})/);
   return match ? parseInt(match[1], 10) : 0;
 };
 
@@ -22,7 +22,7 @@ const getSessionStartYear = (sessionStr) => {
  */
 const getTermOrder = (termName) => {
   if (!termName) return 0;
-  const normalized = termName.trim().toLowerCase();
+  const normalized = String(termName).trim().toLowerCase();
   if (normalized.includes('first') || normalized.includes('1st')) return 1;
   if (normalized.includes('second') || normalized.includes('2nd')) return 2;
   if (normalized.includes('third') || normalized.includes('3rd')) return 3;
@@ -399,7 +399,7 @@ export const getStudentProfile = async (req, res) => {
       rawCurrentTermFee = currentPersonalizedItems.reduce((sum, item) => sum + item.amount, 0);
     }
 
-    // 🟢 4. Fetch ALL successful payments sorted chronologically without term restrictions
+    // 4. Fetch ALL successful payments sorted chronologically without term restrictions
     const paymentLogs = await Payment.find({ studentId: student._id, status: 'Successful' })
       .sort({ createdAt: -1 })
       .lean();
@@ -484,7 +484,7 @@ export const getStudentProfile = async (req, res) => {
         admissionTerm: actualAdmissionTerm,
         academicSession: currentSession, 
         academicTerm: currentTerm,       
-        currentClass: resolvedClassForView, // 🟢 Dynamically matches historical class if viewing an older session
+        currentClass: resolvedClassForView,
         enrollmentType: studentTypeLabel,
         status: student.status || "Active",
         passportPhoto: student.passportPhoto || null,
@@ -507,7 +507,7 @@ export const getStudentProfile = async (req, res) => {
     console.error("💥 Student dashboard profile payload fetch exception:", error);
     return res.status(500).json({ 
       success: false, 
-      message: "Server error retrieving profile dashboard metrics.", 
+      message: error.message || "Server error retrieving profile dashboard metrics.", 
       error: error.message 
     });
   }
@@ -559,7 +559,7 @@ export const getAllStudents = async (req, res) => {
     console.error("💥 Student directory fetch exception:", error);
     return res.status(500).json({ 
       success: false, 
-      message: "Internal server error gathering student directory records.", 
+      message: error.message || "Internal server error gathering student directory records.", 
       error: error.message 
     });
   }
@@ -587,7 +587,7 @@ export const getStudentById = async (req, res) => {
     console.error("💥 Student profile parameter retrieval exception:", error);
     return res.status(500).json({ 
       success: false, 
-      message: 'Server error retrieving profile details.', 
+      message: error.message || 'Server error retrieving profile details.', 
       error: error.message 
     });
   }
@@ -595,7 +595,7 @@ export const getStudentById = async (req, res) => {
 
 /**
  * @route   PUT /api/students/:id
- * @desc    Update an existing student
+ * @desc    Update an existing student safely without crashing on null field values
  * @access  Private (Admin)
  */
 export const updateStudent = async (req, res) => {
@@ -604,19 +604,21 @@ export const updateStudent = async (req, res) => {
     let updateData = { ...req.body };
 
     const systemConfig = await getSystemConfig();
+    const activeTerm = systemConfig?.currentTerm || "First Term";
 
+    // Rebuild composite name if individual parts are passed
     if (req.body.firstName || req.body.surname) {
       const currentStudent = await Student.findById(studentId);
       if (currentStudent) {
-        const first = req.body.firstName || currentStudent.firstName;
-        const sur = req.body.surname || currentStudent.surname;
-        const other = req.body.otherName !== undefined ? req.body.otherName : currentStudent.otherName;
-        updateData.name = `${first.trim()} ${sur.trim()} ${other ? other.trim() : ''}`.replace(/\s+/g, ' ').trim();
+        const first = req.body.firstName !== undefined ? req.body.firstName : (currentStudent.firstName || '');
+        const sur = req.body.surname !== undefined ? req.body.surname : (currentStudent.surname || '');
+        const other = req.body.otherName !== undefined ? req.body.otherName : (currentStudent.otherName || '');
+        updateData.name = `${String(first).trim()} ${String(sur).trim()} ${String(other).trim()}`.replace(/\s+/g, ' ').trim();
       }
     }
 
     if (req.body.gender) {
-      updateData.gender = req.body.gender.trim();
+      updateData.gender = String(req.body.gender).trim();
     }
 
     if (req.file && req.file.path) {
@@ -624,8 +626,12 @@ export const updateStudent = async (req, res) => {
     }
 
     if (!updateData.admissionTerm && !updateData.admittedTerm) {
-      updateData.admissionTerm = systemConfig.currentTerm;
-      updateData.admittedTerm = systemConfig.currentTerm;
+      updateData.admissionTerm = activeTerm;
+      updateData.admittedTerm = activeTerm;
+    }
+
+    if (updateData.email) {
+      updateData.email = String(updateData.email).toLowerCase().trim();
     }
 
     const updatedStudent = await Student.findByIdAndUpdate(
@@ -642,7 +648,7 @@ export const updateStudent = async (req, res) => {
       await User.findByIdAndUpdate(updatedStudent.user, {
         $set: {
           name: updatedStudent.name,
-          email: updatedStudent.email.toLowerCase().trim()
+          email: updatedStudent.email ? updatedStudent.email.toLowerCase().trim() : undefined
         }
       });
     }
@@ -654,7 +660,11 @@ export const updateStudent = async (req, res) => {
     });
   } catch (error) {
     console.error("💥 Backend student record update mutation exception:", error);
-    return res.status(500).json({ success: false, message: "Internal server update error.", error: error.message });
+    return res.status(500).json({ 
+      success: false, 
+      message: error.message || "Internal server update error.", 
+      error: error.message 
+    });
   }
 };
 
@@ -684,7 +694,11 @@ export const deleteStudent = async (req, res) => {
     });
   } catch (error) {
     console.error("💥 Backend student deletion pipeline exception:", error);
-    return res.status(500).json({ success: false, message: "Internal server deletion error.", error: error.message });
+    return res.status(500).json({ 
+      success: false, 
+      message: error.message || "Internal server deletion error.", 
+      error: error.message 
+    });
   }
 };
 
@@ -720,7 +734,7 @@ export const updateSystemConfig = async (req, res) => {
 
     let promotedCount = 0;
 
-    // 🟢 ACADEMIC ROLLOVER: Run promotion transitions ONLY when the academic session changes
+    // Run promotion transitions ONLY when the academic session changes
     if (isNewSession) {
       const oldSession = previousConfig.currentSession;
 
@@ -770,7 +784,7 @@ export const updateSystemConfig = async (req, res) => {
     console.error("💥 System configuration update exception:", error);
     return res.status(500).json({ 
       success: false, 
-      message: "Internal server error updating system configurations.", 
+      message: error.message || "Internal server error updating system configurations.", 
       error: error.message 
     });
   }
