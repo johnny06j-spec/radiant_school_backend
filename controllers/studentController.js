@@ -102,7 +102,7 @@ const compareStructuresChronologically = (a, b) => {
 export const linkSibling = async (req, res) => {
   try {
     const currentStudentId = req.user.id;
-    const { admissionNo, password } = req.body;
+    const { admissionNo, password } = req.body || {};
 
     if (!admissionNo || !password) {
       return res.status(400).json({ 
@@ -213,7 +213,7 @@ export const linkSibling = async (req, res) => {
  */
 export const unlinkSibling = async (req, res) => {
   try {
-    const { siblingId } = req.body;
+    const { siblingId } = req.body || {};
     const currentStudentId = req.user.id;
 
     if (!siblingId) {
@@ -595,7 +595,7 @@ export const getStudentById = async (req, res) => {
 
 /**
  * @route   PUT /api/students/:id
- * @desc    Update an existing student document using instance .save() with bulletproof fallback checks
+ * @desc    Update an existing student document using instance .save() with fallback request body guards
  * @access  Private (Admin)
  */
 export const updateStudent = async (req, res) => {
@@ -614,7 +614,9 @@ export const updateStudent = async (req, res) => {
     const systemConfig = await getSystemConfig();
     const activeTerm = systemConfig?.currentTerm || "First Term";
 
-    // 2. Extract inputs from request body
+    // 2. Fallback to empty object if req.body is undefined
+    const body = req.body || {};
+
     const {
       firstName,
       surname,
@@ -624,24 +626,25 @@ export const updateStudent = async (req, res) => {
       admissionTerm,
       admittedTerm,
       ...restBody
-    } = req.body;
+    } = body;
 
-    // 3. Update field properties safely with strict string checking
+    // 3. Update field properties safely
     if (firstName !== undefined && firstName !== null) student.firstName = String(firstName).trim();
     if (surname !== undefined && surname !== null) student.surname = String(surname).trim();
     if (otherName !== undefined && otherName !== null) student.otherName = String(otherName).trim();
     if (gender !== undefined && gender !== null) student.gender = String(gender).trim();
     if (email !== undefined && email !== null) student.email = String(email).toLowerCase().trim();
 
-    // 4. Safely reconstruct the display name without throwing undefined errors
+    // 4. Safely reconstruct the display name
     const first = student.firstName || (firstName ? String(firstName) : '') || '';
     const sur = student.surname || (surname ? String(surname) : '') || '';
     const other = student.otherName || (otherName ? String(otherName) : '') || '';
     
     student.name = `${first} ${sur} ${other}`.replace(/\s+/g, ' ').trim();
 
-    if (req.file && req.file.path) {
-      student.passportPhoto = req.file.path;
+    // Attach Multer uploaded file path if present
+    if (req.file && (req.file.path || req.file.secure_url)) {
+      student.passportPhoto = req.file.path || req.file.secure_url;
     }
 
     if (!student.admissionTerm && !student.admittedTerm) {
@@ -652,7 +655,7 @@ export const updateStudent = async (req, res) => {
     // Assign rest of fields from body dynamically
     Object.assign(student, restBody);
 
-    // 5. Save document (runs pre-save middleware cleanly)
+    // 5. Save document cleanly
     const updatedStudent = await student.save();
 
     // 6. Sync linked auth User account if present
@@ -722,7 +725,7 @@ export const deleteStudent = async (req, res) => {
  */
 export const updateSystemConfig = async (req, res) => {
   try {
-    const { currentSession, currentTerm } = req.body;
+    const { currentSession, currentTerm } = req.body || {};
 
     if (!currentSession || !currentTerm) {
       return res.status(400).json({

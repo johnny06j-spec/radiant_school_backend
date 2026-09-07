@@ -10,6 +10,8 @@ import {
   unlinkSibling 
 } from '../controllers/studentController.js';
 import { verifyToken as authMiddleware } from '../middleware/authMiddleware.js';
+// 🔑 Cloud storage engine middleware for passport photo uploads
+import { uploadPassport } from '../config/cloudinary.js'; 
 
 const router = express.Router();
 
@@ -57,10 +59,26 @@ router.get('/:id', authMiddleware, getStudentById);
 
 /**
  * @route   PUT /api/students/:id
- * @desc    Update an existing student record
+ * @desc    Update an existing student record with Multer error trapping for passport photo uploads
  * @access  Private (Admin)
  */
-router.put('/:id', authMiddleware, updateStudent);
+router.put(
+  '/:id', 
+  authMiddleware, 
+  (req, res, next) => {
+    uploadPassport.single('passportPhoto')(req, res, (err) => {
+      if (err) {
+        console.error("💥 Multer/Cloudinary update upload exception:", err);
+        return res.status(400).json({
+          success: false,
+          message: err.message || "Failed to process image attachment. Ensure the image is under 10MB."
+        });
+      }
+      next();
+    });
+  },
+  updateStudent
+);
 
 /**
  * @route   DELETE /api/students/:id
