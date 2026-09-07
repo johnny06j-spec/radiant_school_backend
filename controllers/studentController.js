@@ -595,7 +595,7 @@ export const getStudentById = async (req, res) => {
 
 /**
  * @route   PUT /api/students/:id
- * @desc    Update an existing student safely without crashing on null field values
+ * @desc    Update an existing student safely without crashing on null or missing document references
  * @access  Private (Admin)
  */
 export const updateStudent = async (req, res) => {
@@ -603,18 +603,27 @@ export const updateStudent = async (req, res) => {
     const studentId = req.params.id;
     let updateData = { ...req.body };
 
+    // 1. Safe Document Lookup First
+    const currentStudent = await Student.findById(studentId);
+    if (!currentStudent) {
+      return res.status(404).json({ 
+        success: false, 
+        message: "Student record targeted for update was not found." 
+      });
+    }
+
     const systemConfig = await getSystemConfig();
     const activeTerm = systemConfig?.currentTerm || "First Term";
 
-    // Rebuild composite name if individual parts are passed
-    if (req.body.firstName || req.body.surname) {
-      const currentStudent = await Student.findById(studentId);
-      if (currentStudent) {
-        const first = req.body.firstName !== undefined ? req.body.firstName : (currentStudent.firstName || '');
-        const sur = req.body.surname !== undefined ? req.body.surname : (currentStudent.surname || '');
-        const other = req.body.otherName !== undefined ? req.body.otherName : (currentStudent.otherName || '');
-        updateData.name = `${String(first).trim()} ${String(sur).trim()} ${String(other).trim()}`.replace(/\s+/g, ' ').trim();
-      }
+    // 2. Safely reconstruct the display name
+    if (req.body.firstName !== undefined || req.body.surname !== undefined || req.body.otherName !== undefined) {
+      const first = req.body.firstName !== undefined ? req.body.firstName : (currentStudent?.firstName || '');
+      const sur = req.body.surname !== undefined ? req.body.surname : (currentStudent?.surname || '');
+      const other = req.body.otherName !== undefined ? req.body.otherName : (currentStudent?.otherName || '');
+      
+      updateData.name = `${String(first).trim()} ${String(sur).trim()} ${String(other).trim()}`
+        .replace(/\s+/g, ' ')
+        .trim();
     }
 
     if (req.body.gender) {
@@ -634,17 +643,15 @@ export const updateStudent = async (req, res) => {
       updateData.email = String(updateData.email).toLowerCase().trim();
     }
 
+    // 3. Perform update safely
     const updatedStudent = await Student.findByIdAndUpdate(
       studentId,
       { $set: updateData },
       { new: true, runValidators: true }
     );
 
-    if (!updatedStudent) {
-      return res.status(404).json({ success: false, message: "Student record mutation targeted a non-existent ID." });
-    }
-
-    if (updatedStudent.user) {
+    // 4. Sync linked auth user account
+    if (updatedStudent?.user) {
       await User.findByIdAndUpdate(updatedStudent.user, {
         $set: {
           name: updatedStudent.name,
@@ -655,9 +662,10 @@ export const updateStudent = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: "Student profile saved and database records synchronized successfully.",
+      message: "Student profile updated successfully.",
       student: updatedStudent
     });
+
   } catch (error) {
     console.error("💥 Backend student record update mutation exception:", error);
     return res.status(500).json({ 
