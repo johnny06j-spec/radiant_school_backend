@@ -45,7 +45,7 @@ const studentSchema = new mongoose.Schema({
     enum: ['Male', 'Female', 'Not Specified'],
     default: 'Not Specified'
   },
-  dob: { type: Schema.Types.Mixed, default: "Not Specified" },
+  dob: { type: mongoose.Schema.Types.Mixed, default: "Not Specified" },
   email: { type: String, required: true, unique: true },
   phone: { type: String },
   stateOfOrigin: { type: String },
