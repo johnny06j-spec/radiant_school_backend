@@ -188,7 +188,7 @@ export const linkSibling = async (req, res) => {
     });
 
     const updatedStudent = await Student.findById(currentStudent._id)
-      .populate('linkedSiblings', 'firstName lastName surname name currentClass assignedClass admissionNo passportPhoto');
+      .populate('linkedSiblings', 'firstName lastName surname name currentClass assignedClass admissionNo passportPhoto campus');
 
     return res.status(200).json({
       success: true,
@@ -237,7 +237,7 @@ export const unlinkSibling = async (req, res) => {
     });
 
     const updatedStudent = await Student.findById(currentStudent._id)
-      .populate('linkedSiblings', 'firstName lastName surname name currentClass assignedClass admissionNo passportPhoto');
+      .populate('linkedSiblings', 'firstName lastName surname name currentClass assignedClass admissionNo passportPhoto campus');
 
     return res.status(200).json({
       success: true,
@@ -265,13 +265,13 @@ export const getStudentProfile = async (req, res) => {
     let query = targetId ? { _id: targetId } : { user: req.user.id };
 
     let student = await Student.findOne(query)
-      .populate('user', 'firstName lastName name email')
-      .populate('linkedSiblings', 'firstName lastName surname name currentClass assignedClass admissionNo passportPhoto');
+      .populate('user', 'firstName lastName name email campus')
+      .populate('linkedSiblings', 'firstName lastName surname name currentClass assignedClass admissionNo passportPhoto campus');
 
     if (!student && !targetId) {
       student = await Student.findById(req.user.id)
-        .populate('user', 'firstName lastName name email')
-        .populate('linkedSiblings', 'firstName lastName surname name currentClass assignedClass admissionNo passportPhoto');
+        .populate('user', 'firstName lastName name email campus')
+        .populate('linkedSiblings', 'firstName lastName surname name currentClass assignedClass admissionNo passportPhoto campus');
     }
 
     if (!student) {
@@ -281,10 +281,11 @@ export const getStudentProfile = async (req, res) => {
       });
     }
 
-    // 1. ALWAYS use SystemConfig values dynamically
     const systemConfig = await getSystemConfig();
     const currentSession = systemConfig.currentSession;
     const currentTerm = systemConfig.currentTerm;
+
+    const studentCampus = student.campus || 'Emerald Campus';
 
     const actualAdmissionSession = String(student.admittedSession || student.admissionSession || student.intakeSession || currentSession).trim();
     
@@ -301,7 +302,6 @@ export const getStudentProfile = async (req, res) => {
     const actualAdmissionTerm = String(rawAdmittedTerm).trim();
     const admittedTermWeight = getTermOrder(actualAdmissionTerm);
 
-    // Fetch all adjustments and result reviews for accurate historical resolution
     const adjustments = await Adjustment.find({ studentId: student._id }).lean();
     const allStudentReviews = await ResultReview.find({ studentId: student._id }).lean();
 
@@ -317,8 +317,10 @@ export const getStudentProfile = async (req, res) => {
     const adjustmentIncreases = adjustments.filter(adj => adj.type === 'Fee Increase');
     const totalDiscountsWaivers = adjustmentCredits.reduce((sum, adj) => sum + (Number(adj.amount) || 0), 0);
 
-    // 2. Fetch and sort ALL structures to calculate past expectations chronologically
-    const allStructures = await FeeStructure.find({}).lean();
+    // Filter fee structures scoped to the student's specific campus (or fall back if unassigned)
+    const allStructures = await FeeStructure.find({
+      $or: [{ campus: studentCampus }, { campus: { $exists: false } }]
+    }).lean();
     allStructures.sort(compareStructuresChronologically);
     
     let historicalFeeItemsBreakdown = []; 
@@ -329,7 +331,7 @@ export const getStudentProfile = async (req, res) => {
         if (normalizeClassName(struct.className) === normalizeClassName(historicalClass)) {
           const structTermWeight = getTermOrder(struct.term);
           if (actualAdmissionSession && struct.session === actualAdmissionSession && structTermWeight > 0 && structTermWeight < admittedTermWeight) {
-            return; // Skip terms prior to student enrollment
+            return;
           }
 
           const studentType = actualAdmissionSession === struct.session ? 'New Students' : 'Returning Students';
@@ -360,7 +362,6 @@ export const getStudentProfile = async (req, res) => {
       }
     });
 
-    // 3. Current Active Term Fee Structure
     const currentClassContext = resolveClassForTerm(currentSession, currentTerm);
     const studentNormalizedClass = normalizeClassName(currentClassContext);
 
@@ -399,7 +400,6 @@ export const getStudentProfile = async (req, res) => {
       rawCurrentTermFee = currentPersonalizedItems.reduce((sum, item) => sum + item.amount, 0);
     }
 
-    // 4. Fetch ALL successful payments sorted chronologically without term restrictions
     const paymentLogs = await Payment.find({ studentId: student._id, status: 'Successful' })
       .sort({ createdAt: -1 })
       .lean();
@@ -447,7 +447,6 @@ export const getStudentProfile = async (req, res) => {
       }
     });
 
-    // 5. Re-aggregate financial metrics
     const totalAllocatedCredits = totalPaid + totalDiscountsWaivers;
 
     let finalPrevious = activeHistoricalBreakdown.reduce((sum, item) => sum + item.amount, 0) + 
@@ -467,7 +466,6 @@ export const getStudentProfile = async (req, res) => {
     const isNewStudent = admissionYear >= activeYear;
     const studentTypeLabel = isNewStudent ? 'New Student' : 'Returning Student';
 
-    // Dynamic class resolution for the active timeline context
     const resolvedClassForView = resolveClassForTerm(currentSession, currentTerm) || student.currentClass || "N/A";
 
     return res.status(200).json({
@@ -478,6 +476,7 @@ export const getStudentProfile = async (req, res) => {
         lastName: student.surname || student.lastName || student.user?.lastName || student.user?.name?.split(' ')[1] || "",
         email: student.email || student.user?.email || "N/A",
         admissionNo: student.admissionNo || student.admissionCode || "N/A",
+        campus: student.campus || 'Emerald Campus',
         dob: student.dob || "N/A", 
         gender: student.gender || "N/A",
         admissionSession: actualAdmissionSession,
@@ -515,13 +514,18 @@ export const getStudentProfile = async (req, res) => {
 
 /**
  * @route   GET /api/students
- * @desc    Fetch list of all enrolled students
+ * @desc    Fetch list of all enrolled students with search & campus filters
  * @access  Private (Admin/Staff)
  */
 export const getAllStudents = async (req, res) => {
   try {
-    const { search, assignedClass, intakeSession } = req.query;
+    const { search, assignedClass, intakeSession, campus } = req.query;
     let query = {};
+
+    // 🏫 Filter by Campus ('Emerald Campus' or 'Great Campus')
+    if (campus && campus !== 'All Campuses') {
+      query.campus = campus;
+    }
 
     if (search && search.trim() !== '') {
       const searchRegex = new RegExp(search.trim(), 'i');
@@ -573,7 +577,7 @@ export const getAllStudents = async (req, res) => {
 export const getStudentById = async (req, res) => {
   try {
     const student = await Student.findById(req.params.id)
-      .populate('linkedSiblings', 'firstName lastName surname name currentClass assignedClass admissionNo passportPhoto');
+      .populate('linkedSiblings', 'firstName lastName surname name currentClass assignedClass admissionNo passportPhoto campus');
 
     if (!student) {
       return res.status(404).json({ success: false, message: 'Student operational record not found.' });
@@ -595,14 +599,13 @@ export const getStudentById = async (req, res) => {
 
 /**
  * @route   PUT /api/students/:id
- * @desc    Update an existing student document using instance .save() with fallback request body guards
+ * @desc    Update an existing student document with campus assignment
  * @access  Private (Admin)
  */
 export const updateStudent = async (req, res) => {
   try {
     const studentId = req.params.id;
 
-    // 1. Safe Document Lookup First
     const student = await Student.findById(studentId);
     if (!student) {
       return res.status(404).json({ 
@@ -614,7 +617,6 @@ export const updateStudent = async (req, res) => {
     const systemConfig = await getSystemConfig();
     const activeTerm = systemConfig?.currentTerm || "First Term";
 
-    // 2. Fallback to empty object if req.body is undefined
     const body = req.body || {};
 
     const {
@@ -623,26 +625,25 @@ export const updateStudent = async (req, res) => {
       otherName,
       gender,
       email,
+      campus,
       admissionTerm,
       admittedTerm,
       ...restBody
     } = body;
 
-    // 3. Update field properties safely
     if (firstName !== undefined && firstName !== null) student.firstName = String(firstName).trim();
     if (surname !== undefined && surname !== null) student.surname = String(surname).trim();
     if (otherName !== undefined && otherName !== null) student.otherName = String(otherName).trim();
     if (gender !== undefined && gender !== null) student.gender = String(gender).trim();
     if (email !== undefined && email !== null) student.email = String(email).toLowerCase().trim();
+    if (campus !== undefined && campus !== null) student.campus = String(campus).trim();
 
-    // 4. Safely reconstruct the display name
     const first = student.firstName || (firstName ? String(firstName) : '') || '';
     const sur = student.surname || (surname ? String(surname) : '') || '';
     const other = student.otherName || (otherName ? String(otherName) : '') || '';
     
     student.name = `${first} ${sur} ${other}`.replace(/\s+/g, ' ').trim();
 
-    // Attach Multer uploaded file path if present
     if (req.file && (req.file.path || req.file.secure_url)) {
       student.passportPhoto = req.file.path || req.file.secure_url;
     }
@@ -652,18 +653,16 @@ export const updateStudent = async (req, res) => {
       student.admittedTerm = activeTerm;
     }
 
-    // Assign rest of fields from body dynamically
     Object.assign(student, restBody);
 
-    // 5. Save document cleanly
     const updatedStudent = await student.save();
 
-    // 6. Sync linked auth User account if present
     if (updatedStudent.user) {
       await User.findByIdAndUpdate(updatedStudent.user, {
         $set: {
           name: updatedStudent.name,
-          email: updatedStudent.email ? updatedStudent.email.toLowerCase().trim() : undefined
+          email: updatedStudent.email ? updatedStudent.email.toLowerCase().trim() : undefined,
+          campus: updatedStudent.campus
         }
       });
     }
@@ -750,11 +749,9 @@ export const updateSystemConfig = async (req, res) => {
 
     let promotedCount = 0;
 
-    // Run promotion transitions ONLY when the academic session changes
     if (isNewSession) {
       const oldSession = previousConfig.currentSession;
 
-      // Find all approved Third Term reviews from the old session
       const approvedReviews = await ResultReview.find({
         session: oldSession,
         term: /third/i,
