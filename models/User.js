@@ -39,6 +39,15 @@ const userSchema = new mongoose.Schema({
     lowercase: true,
     default: 'student' 
   },
+
+  // 🏫 MULTI-CAMPUS STAFF/USER IDENTIFIER
+  campus: {
+    type: String,
+    required: [true, 'Staff campus assignment is required'],
+    enum: ['Emerald Campus', 'Great Campus'],
+    default: 'Emerald Campus'
+  },
+
   phone: {
     type: String,
     trim: true
