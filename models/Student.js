@@ -10,6 +10,14 @@ const studentSchema = new mongoose.Schema({
   admissionNo: { type: String, required: true, unique: true },
   currentClass: { type: String, required: true },
 
+  // 🏫 MULTI-CAMPUS IDENTIFIER
+  campus: {
+    type: String,
+    required: [true, 'School campus selection is required'],
+    enum: ['Emerald Campus', 'Great Campus'],
+    default: 'Emerald Campus'
+  },
+
   // 🟢 MULTI-CHILD SIBLING LINKING ARRAY
   linkedSiblings: [{
     type: mongoose.Schema.Types.ObjectId,
