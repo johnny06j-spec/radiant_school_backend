@@ -38,20 +38,25 @@ const calculateGrade = (score, section = 'PRIMARY') => {
 };
 
 /**
- * @route   POST /api/teachers/register
- * @desc    Provision new instructor / HM / Principal profile
+ * @route   POST /api/teachers/register (or /api/teachers)
+ * @desc    Provision new instructor / HM / Principal profile with explicit campus assignment
  */
 export const registerStaff = async (req, res) => {
   try {
     const { 
       surname, firstName, name, email, phone, schoolSection, 
       assignedClass, department, subjectAllocations, username, 
-      password, isClassTeacher, classTeacherOf, role = 'teacher' 
+      password, isClassTeacher, classTeacherOf, role = 'teacher',
+      campus
     } = req.body;
 
     const targetSurname = surname ? surname.trim() : '';
     const targetFirstName = firstName ? firstName.trim() : '';
     const fullName = name ? name.trim() : `${targetSurname} ${targetFirstName}`.trim();
+
+    // 🔴 Multi-Campus Normalization
+    const rawCampus = typeof campus === 'string' ? campus : String(campus || 'Emerald Campus');
+    const cleanCampus = ['Emerald Campus', 'Great Campus'].includes(rawCampus.trim()) ? rawCampus.trim() : 'Emerald Campus';
 
     if (!fullName || !email) {
       return res.status(400).json({ success: false, message: "Please fill out required core fields." });
@@ -104,6 +109,7 @@ export const registerStaff = async (req, res) => {
       username: finalUsername,
       password: hashedPassword,
       role: assignedRole,
+      campus: cleanCampus, // 👈 Persist Campus
       phone: phone ? phone.trim() : '',
       schoolSection: activeSection,
       department: isExec ? 'Executive Administration' : (department || 'General'),
@@ -124,6 +130,7 @@ export const registerStaff = async (req, res) => {
         email: newStaff.email,
         username: newStaff.username,
         role: newStaff.role,
+        campus: newStaff.campus,
         isClassTeacher: newStaff.isClassTeacher,
         classTeacherOf: newStaff.classTeacherOf
       },
@@ -139,7 +146,7 @@ export const registerStaff = async (req, res) => {
 
 /**
  * @route   PUT /api/teachers/:id
- * @desc    Update staff profile
+ * @desc    Update staff profile including campus
  */
 export const updateStaff = async (req, res) => {
   try {
@@ -147,7 +154,7 @@ export const updateStaff = async (req, res) => {
     const { 
       surname, firstName, name, email, phone, schoolSection, 
       assignedClass, department, subjectAllocations, isClassTeacher, 
-      classTeacherOf, role, password 
+      classTeacherOf, role, password, campus 
     } = req.body;
 
     const staffUser = await User.findById(staffId);
@@ -167,6 +174,10 @@ export const updateStaff = async (req, res) => {
       updateFields.name = name.trim();
     } else if (surname !== undefined || firstName !== undefined) {
       updateFields.name = `${targetSurname} ${targetFirstName}`.trim();
+    }
+
+    if (campus !== undefined && typeof campus === 'string' && campus.trim() !== '') {
+      updateFields.campus = campus.trim();
     }
 
     if (email && email.toLowerCase().trim() !== staffUser.email) {
@@ -237,11 +248,17 @@ export const updateStaff = async (req, res) => {
 
 /**
  * @route   GET /api/teachers
- * @desc    Fetch list of all staff members
+ * @desc    Fetch list of staff members filtered optionally by campus
  */
 export const getAllStaff = async (req, res) => {
   try {
-    const staff = await User.find({ role: { $in: ['teacher', 'headmaster', 'principal'] } }).select('-password').sort({ createdAt: -1 }).lean();
+    const filter = { role: { $in: ['teacher', 'headmaster', 'principal', 'TEACHER', 'HEADMASTER', 'PRINCIPAL'] } };
+
+    if (req.query.campus && req.query.campus !== 'All Campuses') {
+      filter.campus = req.query.campus;
+    }
+
+    const staff = await User.find(filter).select('-password').sort({ createdAt: -1 }).lean();
     return res.status(200).json({ success: true, staff });
   } catch (error) {
     return res.status(500).json({ success: false, message: "Error fetching staff members.", error: error.message });
@@ -265,13 +282,17 @@ export const deleteStaff = async (req, res) => {
 
 /**
  * @route   GET /api/teachers/executive-reviews
- * @desc    Fetch pending/submitted/returned student result reviews for HM/Principal desk
+ * @desc    Fetch pending/submitted/returned student result reviews for HM/Principal desk with campus filter
  */
 export const getExecutiveReviews = async (req, res) => {
   try {
-    const { className, term, session, status } = req.query;
+    const { className, term, session, status, campus } = req.query;
 
     let query = {};
+
+    if (campus && campus !== 'All Campuses') {
+      query.campus = campus.trim();
+    }
 
     if (className) {
       const cleanClass = className.trim();
@@ -307,7 +328,7 @@ export const getExecutiveReviews = async (req, res) => {
 
     const populatedReviews = await Promise.all(
       reviews.map(async (rev) => {
-        const student = await Student.findById(rev.studentId).select('firstName surname name admissionNo passportPhoto currentClass').lean().catch(() => null);
+        const student = await Student.findById(rev.studentId).select('firstName surname name admissionNo passportPhoto currentClass campus').lean().catch(() => null);
         
         return {
           _id: rev.studentId || rev._id,
@@ -317,6 +338,7 @@ export const getExecutiveReviews = async (req, res) => {
           surname: student?.surname || rev.studentName?.split(' ').slice(1).join(' ') || '',
           admissionNo: student?.admissionNo || rev.admissionNo || 'N/A',
           passportPhoto: student?.passportPhoto || null,
+          campus: student?.campus || rev.campus || 'Emerald Campus',
           status: rev.status,
           className: rev.className || className,
           overallAverage: rev.overallAverage || 0,
@@ -346,7 +368,7 @@ export const getExecutiveReviews = async (req, res) => {
  */
 export const getSingleStudentReview = async (req, res) => {
   try {
-    const { studentId, className, term, session } = req.query;
+    const { studentId, className, term, session, campus } = req.query;
 
     if (!studentId || !className || !term || !session) {
       return res.status(400).json({
@@ -362,6 +384,15 @@ export const getSingleStudentReview = async (req, res) => {
     const section = isPrimary ? 'PRIMARY' : 'SECONDARY';
     const classRegex = new RegExp(`^${cleanClass.replace(/\s+/g, '\\s*')}$`, 'i');
 
+    const gridFilter = {
+      className: classRegex,
+      term: term.trim(),
+      session: session.trim()
+    };
+    if (campus && campus !== 'All Campuses') {
+      gridFilter.campus = campus.trim();
+    }
+
     const [studentDoc, reviewDoc, grids] = await Promise.all([
       Student.findById(studentId).lean().catch(() => null),
       ResultReview.findOne({
@@ -370,11 +401,7 @@ export const getSingleStudentReview = async (req, res) => {
         term: term.trim(),
         session: session.trim()
       }).lean(),
-      GradingGrid.find({
-        className: classRegex,
-        term: term.trim(),
-        session: session.trim()
-      }).lean()
+      GradingGrid.find(gridFilter).lean()
     ]);
 
     // 🟢 Robust Previous Term B.F Scores Lookup
@@ -384,11 +411,16 @@ export const getSingleStudentReview = async (req, res) => {
     if (normalizedTerm !== 'FIRST TERM') {
       let priorTermRegex = normalizedTerm.includes('THIRD') ? /second|2nd/i : /first|1st/i;
 
-      const priorGrids = await GradingGrid.find({
+      const priorFilter = {
         className: classRegex,
         term: priorTermRegex,
         session: session.trim()
-      }).lean();
+      };
+      if (campus && campus !== 'All Campuses') {
+        priorFilter.campus = campus.trim();
+      }
+
+      const priorGrids = await GradingGrid.find(priorFilter).lean();
 
       priorGrids.forEach(pg => {
         const match = pg.studentsScores?.find(s => 
@@ -447,7 +479,7 @@ export const getSingleStudentReview = async (req, res) => {
     return res.status(200).json({
       success: true,
       data: {
-        student: studentDoc || { _id: studentId, name: reviewDoc?.name || 'Student' },
+        student: studentDoc || { _id: studentId, name: reviewDoc?.name || 'Student', campus: campus || 'Emerald Campus' },
         review: reviewDoc || {},
         subjects,
         overallAverage: calculatedAvg,

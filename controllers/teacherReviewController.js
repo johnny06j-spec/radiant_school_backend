@@ -1,3 +1,4 @@
+// controllers/teacherReviewController.js
 import Student from '../models/Student.js';
 import GradingGrid from '../models/GradingGrid.js';
 import ResultReview from '../models/ResultReview.js';
@@ -32,11 +33,11 @@ const calculateGradeAndRemark = (score, isPrimary = false) => {
 
 /**
  * @route   GET /api/teachers/review-single
- * @desc    Fetch aggregated scores for Ready Results along with student metadata
+ * @desc    Fetch aggregated scores for Ready Results along with student metadata (Campus Aware)
  */
 export const getStudentResultReview = async (req, res) => {
   try {
-    const { studentId, className, term, session, admissionNo } = req.query;
+    const { studentId, className, term, session, admissionNo, campus } = req.query;
 
     if (!studentId || !term || !session) {
       return res.status(400).json({ success: false, message: "Missing required query parameters." });
@@ -49,6 +50,7 @@ export const getStudentResultReview = async (req, res) => {
     const studentDoc = await Student.findById(studentId).lean().catch(() => null);
     const targetNormName = normalizeName(studentDoc?.name || '');
     const targetAdmNo = (admissionNo || studentDoc?.admissionNo || '').toString().trim().toUpperCase();
+    const targetCampus = campus || studentDoc?.campus || 'Emerald Campus';
 
     let previousTerm = null;
     if (term === 'Second Term') previousTerm = 'First Term';
@@ -56,7 +58,10 @@ export const getStudentResultReview = async (req, res) => {
 
     let prevGridsMap = {};
     if (previousTerm) {
-      const priorGrids = await GradingGrid.find({ className: classRegex, term: previousTerm, session }).lean();
+      const priorFilter = { className: classRegex, term: previousTerm, session };
+      if (targetCampus) priorFilter.campus = targetCampus;
+
+      const priorGrids = await GradingGrid.find(priorFilter).lean();
 
       priorGrids.forEach(pg => {
         const matchingPrevCell = pg.studentsScores?.find(s => {
@@ -78,7 +83,10 @@ export const getStudentResultReview = async (req, res) => {
       });
     }
 
-    const grids = await GradingGrid.find({ className: classRegex, term, session }).lean();
+    const gridFilter = { className: classRegex, term, session };
+    if (targetCampus) gridFilter.campus = targetCampus;
+
+    const grids = await GradingGrid.find(gridFilter).lean();
 
     let studentSubjectScores = [];
     let totalScoreSum = 0;
@@ -144,6 +152,7 @@ export const getStudentResultReview = async (req, res) => {
       reviewDoc = {
         studentId,
         className: cleanClass,
+        campus: targetCampus,
         term,
         session,
         status: 'Pending Review',
@@ -158,6 +167,7 @@ export const getStudentResultReview = async (req, res) => {
       };
     } else {
       reviewDoc.overallAverage = overallAverage;
+      if (!reviewDoc.campus) reviewDoc.campus = targetCampus;
     }
 
     const formattedStudent = studentDoc ? {
@@ -166,6 +176,7 @@ export const getStudentResultReview = async (req, res) => {
       firstName: studentDoc.firstName || studentDoc.firstname || studentDoc.name?.split(' ')[0] || 'Student',
       lastName: studentDoc.lastName || studentDoc.surname || studentDoc.name?.split(' ').slice(1).join(' ') || '',
       admissionNo: studentDoc.admissionNo || studentDoc.registrationNo || 'N/A',
+      campus: studentDoc.campus || targetCampus,
       passportUrl: studentDoc.passportPhoto || studentDoc.passportUrl || studentDoc.passport || studentDoc.avatar || studentDoc.photo || ''
     } : null;
 
@@ -193,16 +204,17 @@ export const getStudentResultReview = async (req, res) => {
 export const saveResultReview = async (req, res) => {
   try {
     const { 
-      studentId, className, schoolSection, term, session, 
+      studentId, className, schoolSection, term, session, campus,
       characterDevelopment, practicalSkills, teacherRemark, submitAction 
     } = req.body;
 
     const newStatus = submitAction === 'SUBMIT' ? 'Submitted' : 'Pending Review';
 
-    const studentDoc = await Student.findById(studentId).select('name surname firstname firstName admissionNo registrationNo').lean();
+    const studentDoc = await Student.findById(studentId).select('name surname firstname firstName admissionNo registrationNo campus').lean();
     const displayName = studentDoc?.name || `${studentDoc?.surname || ''} ${studentDoc?.firstname || studentDoc?.firstName || ''}`.trim() || 'Student';
     const displayAdm = studentDoc?.admissionNo || studentDoc?.registrationNo || 'N/A';
     const cleanClass = className ? className.trim() : '';
+    const targetCampus = campus || studentDoc?.campus || 'Emerald Campus';
 
     // Run the central calculation engine to compute canonical subjects, brought-forward scores, and overall average
     const computedData = await buildStudentResultSubjects({
@@ -210,7 +222,8 @@ export const saveResultReview = async (req, res) => {
       studentDoc,
       className: cleanClass,
       term: term.trim(),
-      session: session.trim()
+      session: session.trim(),
+      campus: targetCampus
     });
 
     const updatedReview = await ResultReview.findOneAndUpdate(
@@ -221,6 +234,7 @@ export const saveResultReview = async (req, res) => {
           name: displayName,
           admissionNo: displayAdm,
           className: cleanClass,
+          campus: targetCampus,
           schoolSection,
           term: term.trim(),
           session: session.trim(),
@@ -239,8 +253,11 @@ export const saveResultReview = async (req, res) => {
     );
 
     if (cleanClass) {
+      const gridUpdateFilter = { className: cleanClass, term: term.trim(), session: session.trim() };
+      if (targetCampus) gridUpdateFilter.campus = targetCampus;
+
       await GradingGrid.updateMany(
-        { className: cleanClass, term: term.trim(), session: session.trim() },
+        gridUpdateFilter,
         { $set: { status: newStatus, rejectionReason: '' } }
       );
     }
@@ -258,11 +275,11 @@ export const saveResultReview = async (req, res) => {
 
 /**
  * @route   POST /api/teachers/submit-batch-class
- * @desc    Submit entire class results to Principal / HM at once
+ * @desc    Submit entire class results to Principal / HM at once (Campus Filtered)
  */
 export const submitBatchClassResults = async (req, res) => {
   try {
-    const { className, term, session, schoolSection } = req.body;
+    const { className, term, session, schoolSection, campus } = req.body;
 
     if (!className || !term || !session) {
       return res.status(400).json({ success: false, message: "Missing class or session data." });
@@ -271,9 +288,14 @@ export const submitBatchClassResults = async (req, res) => {
     const cleanClass = className.trim();
     const classRegex = new RegExp(`^${cleanClass.replace(/\s+/g, '\\s*')}$`, 'i');
 
-    const students = await Student.find({
+    const studentFilter = {
       $or: [{ currentClass: classRegex }, { assignedClass: classRegex }]
-    }).select('_id name surname firstname firstName admissionNo registrationNo');
+    };
+    if (campus && campus !== 'All Campuses') {
+      studentFilter.campus = campus.trim();
+    }
+
+    const students = await Student.find(studentFilter).select('_id name surname firstname firstName admissionNo registrationNo campus');
 
     if (!students || students.length === 0) {
       return res.status(404).json({ success: false, message: "No enrolled students found in this class." });
@@ -282,6 +304,7 @@ export const submitBatchClassResults = async (req, res) => {
     for (const s of students) {
       const displayName = s.name || `${s.surname || ''} ${s.firstname || s.firstName || ''}`.trim() || 'Student';
       const displayAdm = s.admissionNo || s.registrationNo || 'N/A';
+      const studentCampus = s.campus || campus || 'Emerald Campus';
 
       // Compute canonical cumulative scores for every student in the batch
       const computedData = await buildStudentResultSubjects({
@@ -289,7 +312,8 @@ export const submitBatchClassResults = async (req, res) => {
         studentDoc: s,
         className: cleanClass,
         term: term.trim(),
-        session: session.trim()
+        session: session.trim(),
+        campus: studentCampus
       });
 
       await ResultReview.findOneAndUpdate(
@@ -300,6 +324,7 @@ export const submitBatchClassResults = async (req, res) => {
             name: displayName,
             admissionNo: displayAdm,
             className: cleanClass,
+            campus: studentCampus,
             schoolSection: schoolSection || 'PRIMARY',
             term: term.trim(),
             session: session.trim(),
@@ -315,14 +340,17 @@ export const submitBatchClassResults = async (req, res) => {
       );
     }
 
+    const gridBatchFilter = { className: classRegex, term: term.trim(), session: session.trim() };
+    if (campus && campus !== 'All Campuses') gridBatchFilter.campus = campus.trim();
+
     await GradingGrid.updateMany(
-      { className: classRegex, term: term.trim(), session: session.trim() },
+      gridBatchFilter,
       { $set: { status: 'Submitted', rejectionReason: '' } }
     );
 
     return res.status(200).json({
       success: true,
-      message: `Results for all ${students.length} students in ${cleanClass} submitted to Executive Desk successfully with cumulative calculations!`
+      message: `Results for all ${students.length} students in ${cleanClass} (${campus || 'Campus'}) submitted to Executive Desk successfully!`
     });
   } catch (error) {
     console.error("💥 Error in batch submission:", error);
