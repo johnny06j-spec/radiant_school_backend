@@ -10,6 +10,10 @@ import systemRoutes from './routes/systemRoutes.js';
 import teacherRoutes from './routes/teacherRoutes.js';
 import attendanceRoutes from './routes/attendanceRoutes.js';
 
+// Import models for backfilling legacy documents
+import Student from './models/Student.js';
+import User from './models/User.js';
+
 dotenv.config();
 const app = express();
 
@@ -55,11 +59,36 @@ app.get('/api/health', (req, res) => {
   res.status(200).json({ status: "Database connection pipeline online" });
 });
 
+// 🟢 ONE-TIME LEGACY CAMPUS BACKFILL SCRIPT
+const backfillLegacyCampus = async () => {
+  try {
+    const studentRes = await Student.updateMany(
+      { $or: [{ campus: { $exists: false } }, { campus: null }, { campus: '' }] },
+      { $set: { campus: 'Emerald Campus' } }
+    );
+
+    const userRes = await User.updateMany(
+      { $or: [{ campus: { $exists: false } }, { campus: null }, { campus: '' }] },
+      { $set: { campus: 'Emerald Campus' } }
+    );
+
+    if (studentRes.modifiedCount > 0 || userRes.modifiedCount > 0) {
+      console.log(`✅ Legacy Campus Backfill: Assigned 'Emerald Campus' to ${studentRes.modifiedCount} students and ${userRes.modifiedCount} staff members.`);
+    }
+  } catch (err) {
+    console.error('⚠️ Campus backfill execution notice:', err.message);
+  }
+};
+
 // 4. Connect to MongoDB and start the server safely
 const PORT = process.env.PORT || 5000;
 mongoose.connect(process.env.MONGO_URI)
-  .then(() => {
+  .then(async () => {
     console.log('🚀 Connected smoothly to MongoDB Atlas Cluster');
+    
+    // Execute legacy document migration on startup
+    await backfillLegacyCampus();
+
     app.listen(PORT, () => console.log(`Server executing safely on port ${PORT}`));
   })
   .catch((err) => {
