@@ -153,10 +153,14 @@ export const registerStudent = async (req, res) => {
     const safeSurname = String(surname || '').trim();
     const safeOtherName = String(otherName || '').trim();
 
-    const targetClass = (currentClass || assignedClass || '').trim();
-    const targetSession = (admittedSession || intakeSession || admissionSession || '2026/2027').trim();
-    const targetTerm = (admittedTerm || intakeTerm || admissionTerm || 'First Term').trim();
-    const targetCampus = (campus && ['Emerald Campus', 'Great Campus'].includes(campus.trim())) ? campus.trim() : 'Emerald Campus';
+    // 🔴 BUG FIX: Safely parse and convert campus into a clean string before trimming
+    const rawCampus = typeof campus === 'string' ? campus : String(campus || 'Emerald Campus');
+    const cleanCampus = rawCampus.trim();
+
+    const targetClass = String(currentClass || assignedClass || '').trim();
+    const targetSession = String(admittedSession || intakeSession || admissionSession || '2026/2027').trim();
+    const targetTerm = String(admittedTerm || intakeTerm || admissionTerm || 'First Term').trim();
+    const targetCampus = ['Emerald Campus', 'Great Campus'].includes(cleanCampus) ? cleanCampus : 'Emerald Campus';
 
     if (!safeSurname || !safeFirstName || !targetClass || !targetSession || !email) {
       return res.status(400).json({
