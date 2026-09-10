@@ -614,7 +614,7 @@ export const getStudentById = async (req, res) => {
 
 /**
  * @route   PUT /api/students/:id
- * @desc    Update an existing student document safely with ObjectId validation and user synchronization
+ * @desc    Update an existing student document safely with ObjectId validation and campus sanitization
  * @access  Private (Admin)
  */
 export const updateStudent = async (req, res) => {
@@ -654,16 +654,28 @@ export const updateStudent = async (req, res) => {
       ...restBody
     } = body;
 
+    // 🟢 SANITIZE CAMPUS: Clean array or comma-duplicated inputs ('Great Campus,Great Campus')
+    let sanitizedCampus = campus;
+    if (Array.isArray(sanitizedCampus)) {
+      sanitizedCampus = sanitizedCampus[0];
+    } else if (typeof sanitizedCampus === 'string' && sanitizedCampus.includes(',')) {
+      sanitizedCampus = sanitizedCampus.split(',')[0];
+    }
+
     if (firstName !== undefined && firstName !== null) student.firstName = String(firstName).trim();
     if (surname !== undefined && surname !== null) student.surname = String(surname).trim();
     if (otherName !== undefined && otherName !== null) student.otherName = String(otherName).trim();
     if (gender !== undefined && gender !== null) student.gender = String(gender).trim();
     if (email !== undefined && email !== null) student.email = String(email).toLowerCase().trim();
-    if (campus !== undefined && campus !== null) student.campus = String(campus).trim();
+    
+    // Assign single sanitized campus string
+    if (sanitizedCampus) {
+      student.campus = String(sanitizedCampus).trim();
+    }
 
-    const first = student.firstName || (firstName ? String(firstName) : '') || '';
-    const sur = student.surname || (surname ? String(surname) : '') || '';
-    const other = student.otherName || (otherName ? String(otherName) : '') || '';
+    const first = student.firstName || '';
+    const sur = student.surname || '';
+    const other = student.otherName || '';
     
     student.name = `${first} ${sur} ${other}`.replace(/\s+/g, ' ').trim();
 
@@ -675,6 +687,9 @@ export const updateStudent = async (req, res) => {
       student.admissionTerm = activeTerm;
       student.admittedTerm = activeTerm;
     }
+
+    // 🔴 Delete campus from restBody so Object.assign does not overwrite sanitized campus
+    delete restBody.campus;
 
     Object.assign(student, restBody);
 
