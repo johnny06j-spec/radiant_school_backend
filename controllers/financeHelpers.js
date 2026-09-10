@@ -59,10 +59,19 @@ export const isOlderTerm = (compSession, compTerm, targetSession, targetTerm) =>
 
 /**
  * 🔒 CORE ENROLLMENT GUARDIAN:
- * Determines if a student was active/enrolled during a target session/term.
+ * Determines if a student was active/enrolled during a target session/term and campus.
  */
-export const isStudentEnrolledInTerm = (student, targetSession, targetTerm) => {
+export const isStudentEnrolledInTerm = (student, targetSession, targetTerm, targetCampus = null) => {
   if (!student) return false;
+
+  // 1. Campus Validation (If target campus specified, ensure matching campus)
+  if (targetCampus && targetCampus !== 'All Campuses') {
+    const studentCampus = String(student.campus || 'Emerald Campus').trim();
+    const cleanTargetCampus = String(targetCampus).trim();
+    if (studentCampus !== cleanTargetCampus) {
+      return false;
+    }
+  }
 
   const intakeSession = String(
     student.intakeSession || 
