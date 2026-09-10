@@ -36,51 +36,53 @@ const resolveStudentName = (student) => {
   return "Active Student";
 };
 
-// Helper function to determine term chronological weight
-const getTermOrder = (termName) => {
-  if (!termName) return 0;
-  const normalized = termName.trim().toLowerCase();
-  if (normalized.includes('first') || normalized.includes('1st')) return 1;
-  if (normalized.includes('second') || normalized.includes('2nd')) return 2;
-  if (normalized.includes('third') || normalized.includes('3rd')) return 3;
-  return 0;
-};
-
-// @desc Calculate dashboard metrics (Synchronized with active student ledgers)
+// @desc Calculate dashboard metrics (Synchronized with active student ledgers and campus)
 // @route GET /api/finance/dashboard-summary
 export const getGlobalFinanceSummary = async (req, res) => {
   try {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
 
-    const { session, term } = req.query;
+    const { session, term, campus } = req.query;
     
     const systemSettings = await SystemConfig.findOne({});
     const targetSession = session || systemSettings?.currentSession || "2026/2027";
     const targetTerm = term || systemSettings?.currentTerm || "First Term";
 
-    const activeStructures = await FeeStructure.find({ session: targetSession, term: targetTerm, status: 'Active' }).lean();
+    const feeStructureFilter = { session: targetSession, term: targetTerm, status: 'Active' };
+    if (campus && campus !== 'All Campuses') {
+      feeStructureFilter.campus = campus;
+    }
+
+    const activeStructures = await FeeStructure.find(feeStructureFilter).lean();
     
-    const students = await Student.find({ 
+    const studentFilter = {
       $or: [
         { status: { $in: ['Active', 'active', null] } },
         { status: { $exists: false } }
-      ] 
-    }).lean();
+      ]
+    };
+    if (campus && campus !== 'All Campuses') {
+      studentFilter.campus = campus;
+    }
 
+    const students = await Student.find(studentFilter).lean();
     const activeStudentIds = students.map(s => s._id);
 
     let grossExpected = 0;
     const globalAdjustments = await Adjustment.find({ session: targetSession, term: targetTerm }).lean();
 
     students.forEach(student => {
-      // 🔒 ENROLLMENT GUARD: Skip if student was NOT enrolled in target term
-      if (!isStudentEnrolledInTerm(student, targetSession, targetTerm)) {
+      // 🔒 ENROLLMENT & CAMPUS GUARD: Skip if student was NOT enrolled in target term/campus
+      if (!isStudentEnrolledInTerm(student, targetSession, targetTerm, campus)) {
         return;
       }
 
       const studentClass = normalizeClassName(student.currentClass || student.assignedClass || '');
+      const studentCampus = student.campus || 'Emerald Campus';
+
       const matchingStructure = activeStructures.find(struct => 
-        normalizeClassName(struct.className) === studentClass
+        normalizeClassName(struct.className) === studentClass &&
+        (struct.campus === studentCampus || (!struct.campus && studentCampus === 'Emerald Campus'))
       );
 
       if (matchingStructure?.items) {
@@ -143,7 +145,7 @@ export const getGlobalFinanceSummary = async (req, res) => {
 // @route GET /api/finance/debtors
 export const getDebtorsList = async (req, res) => {
   try {
-    const { search, assignedClass, session, term } = req.query;
+    const { search, assignedClass, session, term, campus } = req.query;
 
     const systemSettings = await SystemConfig.findOne({});
     const targetSession = session || systemSettings?.currentSession || "2026/2027";
@@ -156,29 +158,46 @@ export const getDebtorsList = async (req, res) => {
       ]
     };
 
+    if (campus && campus !== 'All Campuses') {
+      studentQuery.campus = campus;
+    }
+
     if (assignedClass && assignedClass !== 'All Classes' && assignedClass !== 'All') {
-      studentQuery.$or = [{ currentClass: assignedClass }, { assignedClass: assignedClass }];
+      const classConditions = [{ currentClass: assignedClass }, { assignedClass: assignedClass }];
+      if (studentQuery.$or) {
+        studentQuery.$and = [{ $or: studentQuery.$or }, { $or: classConditions }];
+        delete studentQuery.$or;
+      } else {
+        studentQuery.$or = classConditions;
+      }
     }
 
     if (search && search.trim() !== '') {
       const searchRegex = new RegExp(search.trim(), 'i');
-      studentQuery.$and = [
-        {
-          $or: [
-            { surname: searchRegex },
-            { lastName: searchRegex },
-            { firstName: searchRegex },
-            { otherName: searchRegex },
-            { name: searchRegex },
-            { studentName: searchRegex },
-            { admissionNo: searchRegex }
-          ]
-        }
+      const searchConditions = [
+        { surname: searchRegex },
+        { lastName: searchRegex },
+        { firstName: searchRegex },
+        { otherName: searchRegex },
+        { name: searchRegex },
+        { studentName: searchRegex },
+        { admissionNo: searchRegex }
       ];
+
+      if (studentQuery.$and) {
+        studentQuery.$and.push({ $or: searchConditions });
+      } else {
+        studentQuery.$and = [{ $or: searchConditions }];
+      }
     }
 
     const students = await Student.find(studentQuery).lean();
-    const allStructures = await FeeStructure.find({}).lean();
+    
+    const structureFilter = {};
+    if (campus && campus !== 'All Campuses') {
+      structureFilter.campus = campus;
+    }
+    const allStructures = await FeeStructure.find(structureFilter).lean();
     const currentTermStructures = allStructures.filter(f => f.session === targetSession && f.term === targetTerm);
 
     let debtors = [];
@@ -188,11 +207,12 @@ export const getDebtorsList = async (req, res) => {
     let uniqueClassesWithDebtors = new Set();
 
     for (const student of students) {
-      // 🔒 1. ENROLLMENT GUARDIAN: Skip students who were not enrolled during this target term/session
-      const isEnrolledInTargetTerm = isStudentEnrolledInTerm(student, targetSession, targetTerm);
+      // 🔒 1. ENROLLMENT GUARDIAN: Skip students who were not enrolled during this target term/session/campus
+      const isEnrolledInTargetTerm = isStudentEnrolledInTerm(student, targetSession, targetTerm, campus);
 
       const currentClass = student.currentClass || student.assignedClass || "JSS 1";
       const normalizedClass = normalizeClassName(currentClass);
+      const studentCampus = student.campus || 'Emerald Campus';
       
       const admittedSession = String(student.intakeSession || student.admittedSession || student.admissionSession || student.academicSession || '').trim();
 
@@ -205,9 +225,10 @@ export const getDebtorsList = async (req, res) => {
       // Calculate past term obligations
       let pastExpectations = 0;
       allStructures.forEach(struct => {
-        if (normalizeClassName(struct.className) === normalizedClass && isOlderTerm(struct.session, struct.term, targetSession, targetTerm)) {
+        const matchesCampus = struct.campus === studentCampus || (!struct.campus && studentCampus === 'Emerald Campus');
+        if (normalizeClassName(struct.className) === normalizedClass && matchesCampus && isOlderTerm(struct.session, struct.term, targetSession, targetTerm)) {
           
-          if (!isStudentEnrolledInTerm(student, struct.session, struct.term)) {
+          if (!isStudentEnrolledInTerm(student, struct.session, struct.term, studentCampus)) {
             return;
           }
 
@@ -229,7 +250,11 @@ export const getDebtorsList = async (req, res) => {
       // Calculate target term expectations ONLY IF ENROLLED
       let currentTermExpectedFee = 0;
       if (isEnrolledInTargetTerm) {
-        const matchingCurrentStructure = currentTermStructures.find(f => normalizeClassName(f.className) === normalizedClass);
+        const matchingCurrentStructure = currentTermStructures.find(f => 
+          normalizeClassName(f.className) === normalizedClass &&
+          (f.campus === studentCampus || (!f.campus && studentCampus === 'Emerald Campus'))
+        );
+
         if (matchingCurrentStructure?.items) {
           const studentType = admittedSession === targetSession ? 'New Students' : 'Returning Students';
           
@@ -246,7 +271,10 @@ export const getDebtorsList = async (req, res) => {
         });
       }
 
-      const matchingCurrentStructure = currentTermStructures.find(f => normalizeClassName(f.className) === normalizedClass);
+      const matchingCurrentStructure = currentTermStructures.find(f => 
+        normalizeClassName(f.className) === normalizedClass &&
+        (f.campus === studentCampus || (!f.campus && studentCampus === 'Emerald Campus'))
+      );
       const isStructureActive = matchingCurrentStructure?.status === 'Active' || matchingCurrentStructure?.status === 'active';
 
       const payments = await Payment.find({ studentId: student._id, status: 'Successful' }).lean();
@@ -280,6 +308,7 @@ export const getDebtorsList = async (req, res) => {
           studentName: computedName,
           admissionNo: student.admissionNo || "N/A",
           class: currentClass,
+          campus: studentCampus,
           previousOutstanding: computedPreviousWithTerm,
           currentOutstanding: computedCurrent,
           totalOutstanding: studentTotalOutstanding
@@ -313,14 +342,25 @@ export const getDebtorsList = async (req, res) => {
 // @route GET /api/finance/debtors/export-pdf
 export const getDebtorsPdfData = async (req, res) => {
   try {
-    const { session, term } = req.query;
+    const { session, term, campus } = req.query;
 
     const systemSettings = await SystemConfig.findOne({});
     const targetSession = session || systemSettings?.currentSession || "2026/2027";
     const targetTerm = term || systemSettings?.currentTerm || "First Term";
 
-    const students = await Student.find({ status: { $in: ['Active', 'active', null] } }).lean();
-    const allStructures = await FeeStructure.find({}).lean();
+    const studentFilter = { status: { $in: ['Active', 'active', null] } };
+    if (campus && campus !== 'All Campuses') {
+      studentFilter.campus = campus;
+    }
+
+    const students = await Student.find(studentFilter).lean();
+
+    const structureFilter = {};
+    if (campus && campus !== 'All Campuses') {
+      structureFilter.campus = campus;
+    }
+
+    const allStructures = await FeeStructure.find(structureFilter).lean();
     const currentTermStructures = allStructures.filter(f => f.session === targetSession && f.term === targetTerm);
 
     let grandTotalPrevious = 0;
@@ -330,10 +370,11 @@ export const getDebtorsPdfData = async (req, res) => {
     let classGroups = {};
 
     for (const student of students) {
-      const isEnrolledInTargetTerm = isStudentEnrolledInTerm(student, targetSession, targetTerm);
+      const isEnrolledInTargetTerm = isStudentEnrolledInTerm(student, targetSession, targetTerm, campus);
 
       const currentClass = student.currentClass || student.assignedClass || "JSS 1";
       const normalizedClass = normalizeClassName(currentClass);
+      const studentCampus = student.campus || 'Emerald Campus';
 
       const admittedSession = String(student.intakeSession || student.admittedSession || student.admissionSession || student.academicSession || '').trim();
 
@@ -345,9 +386,10 @@ export const getDebtorsPdfData = async (req, res) => {
 
       let pastExpectations = 0;
       allStructures.forEach(struct => {
-        if (normalizeClassName(struct.className) === normalizedClass && isOlderTerm(struct.session, struct.term, targetSession, targetTerm)) {
+        const matchesCampus = struct.campus === studentCampus || (!struct.campus && studentCampus === 'Emerald Campus');
+        if (normalizeClassName(struct.className) === normalizedClass && matchesCampus && isOlderTerm(struct.session, struct.term, targetSession, targetTerm)) {
           
-          if (!isStudentEnrolledInTerm(student, struct.session, struct.term)) {
+          if (!isStudentEnrolledInTerm(student, struct.session, struct.term, studentCampus)) {
             return;
           }
 
@@ -368,7 +410,11 @@ export const getDebtorsPdfData = async (req, res) => {
 
       let currentTermExpectedFee = 0;
       if (isEnrolledInTargetTerm) {
-        const matchingCurrentStructure = currentTermStructures.find(f => normalizeClassName(f.className) === normalizedClass);
+        const matchingCurrentStructure = currentTermStructures.find(f => 
+          normalizeClassName(f.className) === normalizedClass &&
+          (f.campus === studentCampus || (!f.campus && studentCampus === 'Emerald Campus'))
+        );
+
         if (matchingCurrentStructure?.items) {
           const studentType = admittedSession === targetSession ? 'New Students' : 'Returning Students';
           
@@ -385,7 +431,10 @@ export const getDebtorsPdfData = async (req, res) => {
         });
       }
 
-      const matchingCurrentStructure = currentTermStructures.find(f => normalizeClassName(f.className) === normalizedClass);
+      const matchingCurrentStructure = currentTermStructures.find(f => 
+        normalizeClassName(f.className) === normalizedClass &&
+        (f.campus === studentCampus || (!f.campus && studentCampus === 'Emerald Campus'))
+      );
       const isStructureActive = matchingCurrentStructure?.status === 'Active' || matchingCurrentStructure?.status === 'active';
 
       const payments = await Payment.find({ studentId: student._id, status: 'Successful' }).lean();
@@ -427,6 +476,7 @@ export const getDebtorsPdfData = async (req, res) => {
         classGroups[currentClass].students.push({
           studentName: computedName,
           admissionNo: student.admissionNo || "N/A",
+          campus: studentCampus,
           previousOutstanding: computedPreviousWithTerm,
           currentOutstanding: computedCurrent,
           totalOutstanding: studentTotalOutstanding
@@ -446,6 +496,7 @@ export const getDebtorsPdfData = async (req, res) => {
       success: true,
       academicSession: targetSession,
       academicTerm: targetTerm,
+      campus: campus || 'All Campuses',
       generatedAtDate: new Date().toLocaleDateString('en-GB'),
       grandTotals: {
         grandTotalPrevious,
