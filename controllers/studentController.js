@@ -1,4 +1,5 @@
 // controllers/studentController.js
+import mongoose from 'mongoose';
 import Student from '../models/Student.js';
 import User from '../models/User.js';
 import FeeStructure from '../models/FeeStructure.js';
@@ -262,13 +263,19 @@ export const unlinkSibling = async (req, res) => {
 export const getStudentProfile = async (req, res) => {
   try {
     const targetId = req.query.studentId || req.params.id;
+    
+    // Safely validate targetId if present
+    if (targetId && !mongoose.Types.ObjectId.isValid(targetId)) {
+      return res.status(400).json({ success: false, message: "Invalid student identifier format." });
+    }
+
     let query = targetId ? { _id: targetId } : { user: req.user.id };
 
     let student = await Student.findOne(query)
       .populate('user', 'firstName lastName name email campus')
       .populate('linkedSiblings', 'firstName lastName surname name currentClass assignedClass admissionNo passportPhoto campus');
 
-    if (!student && !targetId) {
+    if (!student && !targetId && mongoose.Types.ObjectId.isValid(req.user.id)) {
       student = await Student.findById(req.user.id)
         .populate('user', 'firstName lastName name email campus')
         .populate('linkedSiblings', 'firstName lastName surname name currentClass assignedClass admissionNo passportPhoto campus');
@@ -317,7 +324,6 @@ export const getStudentProfile = async (req, res) => {
     const adjustmentIncreases = adjustments.filter(adj => adj.type === 'Fee Increase');
     const totalDiscountsWaivers = adjustmentCredits.reduce((sum, adj) => sum + (Number(adj.amount) || 0), 0);
 
-    // Filter fee structures scoped to the student's specific campus (or fall back if unassigned)
     const allStructures = await FeeStructure.find({
       $or: [{ campus: studentCampus }, { campus: { $exists: false } }]
     }).lean();
@@ -522,7 +528,6 @@ export const getAllStudents = async (req, res) => {
     const { search, assignedClass, intakeSession, campus } = req.query;
     let query = {};
 
-    // 🏫 Filter by Campus ('Emerald Campus' or 'Great Campus')
     if (campus && campus !== 'All Campuses') {
       query.campus = campus;
     }
@@ -571,12 +576,22 @@ export const getAllStudents = async (req, res) => {
 
 /**
  * @route   GET /api/students/:id
- * @desc    Get a single student's complete profile parameters
+ * @desc    Get a single student's complete profile parameters safely with ObjectId validation
  * @access  Private (Admin)
  */
 export const getStudentById = async (req, res) => {
   try {
-    const student = await Student.findById(req.params.id)
+    const { id } = req.params;
+
+    // 🔴 Validate 24-character hexadecimal MongoDB ObjectId
+    if (!mongoose.Types.ObjectId.isValid(id)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid student record identifier format."
+      });
+    }
+
+    const student = await Student.findById(id)
       .populate('linkedSiblings', 'firstName lastName surname name currentClass assignedClass admissionNo passportPhoto campus');
 
     if (!student) {
@@ -599,12 +614,20 @@ export const getStudentById = async (req, res) => {
 
 /**
  * @route   PUT /api/students/:id
- * @desc    Update an existing student document with campus assignment
+ * @desc    Update an existing student document safely with ObjectId validation and user synchronization
  * @access  Private (Admin)
  */
 export const updateStudent = async (req, res) => {
   try {
     const studentId = req.params.id;
+
+    // 🔴 Validate 24-character hexadecimal MongoDB ObjectId
+    if (!mongoose.Types.ObjectId.isValid(studentId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid student record identifier format."
+      });
+    }
 
     const student = await Student.findById(studentId);
     if (!student) {
@@ -685,12 +708,20 @@ export const updateStudent = async (req, res) => {
 
 /**
  * @route   DELETE /api/students/:id
- * @desc    Permanently delete a student document
+ * @desc    Permanently delete a student document cleanly with ObjectId validation
  * @access  Private (Admin)
  */
 export const deleteStudent = async (req, res) => {
   try {
     const studentId = req.params.id;
+
+    // 🔴 Validate 24-character hexadecimal MongoDB ObjectId
+    if (!mongoose.Types.ObjectId.isValid(studentId)) {
+      return res.status(400).json({
+        success: false,
+        message: "Invalid student record identifier format."
+      });
+    }
 
     const student = await Student.findById(studentId);
     if (!student) {
