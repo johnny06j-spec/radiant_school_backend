@@ -153,14 +153,19 @@ export const registerStudent = async (req, res) => {
     const safeSurname = String(surname || '').trim();
     const safeOtherName = String(otherName || '').trim();
 
-    // 🔴 BUG FIX: Safely parse and convert campus into a clean string before trimming
-    const rawCampus = typeof campus === 'string' ? campus : String(campus || 'Emerald Campus');
-    const cleanCampus = rawCampus.trim();
+    // 🟢 SANITIZE CAMPUS: Extract single clean string from string/array/comma-delimited inputs
+    let rawCampus = campus;
+    if (Array.isArray(rawCampus)) {
+      rawCampus = rawCampus[0];
+    } else if (typeof rawCampus === 'string' && rawCampus.includes(',')) {
+      rawCampus = rawCampus.split(',')[0];
+    }
+    const cleanCampus = (rawCampus && String(rawCampus).trim() !== '') ? String(rawCampus).trim() : 'Emerald Campus';
 
     const targetClass = String(currentClass || assignedClass || '').trim();
     const targetSession = String(admittedSession || intakeSession || admissionSession || '2026/2027').trim();
     const targetTerm = String(admittedTerm || intakeTerm || admissionTerm || 'First Term').trim();
-    const targetCampus = ['Emerald Campus', 'Great Campus'].includes(cleanCampus) ? cleanCampus : 'Emerald Campus';
+    const targetCampus = cleanCampus;
 
     if (!safeSurname || !safeFirstName || !targetClass || !targetSession || !email) {
       return res.status(400).json({
@@ -205,7 +210,7 @@ export const registerStudent = async (req, res) => {
       passportPhotoUrl = req.file.path || req.file.secure_url || req.file.url || "";
     }
 
-    // 1. Create Base User
+    // 1. Create Base User with Target Campus
     createdBaseUser = await User.create({
       name: fullName,
       surname: safeSurname,
@@ -226,7 +231,7 @@ export const registerStudent = async (req, res) => {
       }
     }
 
-    // 3. Create Student record
+    // 3. Create Student Record with Target Campus
     const newStudent = await Student.create({
       user: createdBaseUser._id, 
       name: fullName,
@@ -310,26 +315,39 @@ export const getAllStudents = async (req, res) => {
 
     const queryFilters = {};
 
-    // 🏫 Campus Filter ('Emerald Campus' or 'Great Campus')
+    // 🏫 Campus Filter
     if (req.query.campus && req.query.campus !== 'All Campuses') {
       queryFilters.campus = req.query.campus;
     }
 
-    if (req.query.search) {
+    if (req.query.search && req.query.search.trim() !== '') {
       queryFilters.$or = [
-        { name: { $regex: req.query.search, $options: "i" } },
-        { admissionNo: { $regex: req.query.search, $options: "i" } }
+        { name: { $regex: req.query.search.trim(), $options: "i" } },
+        { surname: { $regex: req.query.search.trim(), $options: "i" } },
+        { firstName: { $regex: req.query.search.trim(), $options: "i" } },
+        { admissionNo: { $regex: req.query.search.trim(), $options: "i" } }
       ];
     }
     
     if (req.query.assignedClass || req.query.currentClass) {
       const cls = String(req.query.assignedClass || req.query.currentClass).trim();
       const classRegex = new RegExp(`^${cls.replace(/\s+/g, '\\s*')}$`, 'i');
-      queryFilters.$or = [
+      
+      const classConditions = [
         { currentClass: classRegex },
         { assignedClass: classRegex },
         { className: classRegex }
       ];
+
+      if (queryFilters.$or) {
+        queryFilters.$and = [
+          { $or: queryFilters.$or },
+          { $or: classConditions }
+        ];
+        delete queryFilters.$or;
+      } else {
+        queryFilters.$or = classConditions;
+      }
     }
 
     if (req.query.admittedSession) {
