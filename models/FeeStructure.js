@@ -21,7 +21,9 @@ const FeeStructureSchema = new mongoose.Schema({
     enum: ['First Term', 'Second Term', 'Third Term'] 
   }, // e.g., "First Term"
   session: { type: String, required: true, trim: true }, // e.g., "2026/2027"
+  campus: { type: String, required: true, trim: true, default: 'Emerald Campus' }, // 👈 Multi-campus support
   items: [FeeItemSchema], // Array of itemized breakdowns
+  totalAmount: { type: Number, default: 0 },
   status: { 
     type: String, 
     enum: ['Active', 'Inactive', 'active', 'inactive'], 
@@ -29,7 +31,7 @@ const FeeStructureSchema = new mongoose.Schema({
   }
 }, { timestamps: true });
 
-// Ensures an admin cannot accidentally create duplicate fee rule configs for the same class context
-FeeStructureSchema.index({ className: 1, term: 1, session: 1 }, { unique: true });
+// 🔒 Ensures unique fee structures per Class, Term, Session AND Campus
+FeeStructureSchema.index({ className: 1, term: 1, session: 1, campus: 1 }, { unique: true });
 
 export default mongoose.model('FeeStructure', FeeStructureSchema);
