@@ -13,6 +13,7 @@ import attendanceRoutes from './routes/attendanceRoutes.js';
 // Import models for backfilling legacy documents
 import Student from './models/Student.js';
 import User from './models/User.js';
+import FeeStructure from './models/FeeStructure.js'; // 👈 Added FeeStructure model
 
 dotenv.config();
 const app = express();
@@ -23,12 +24,11 @@ const allowedOrigins = [
   'http://127.0.0.1:5173',
   'http://localhost:5174',
   'http://127.0.0.1:5174',
-  process.env.CLIENT_URL // Automatically allows your live Vercel frontend URL once deployed
+  process.env.CLIENT_URL
 ].filter(Boolean);
 
 app.use(cors({
   origin: (origin, callback) => {
-    // Allow requests with no origin (like Postman or mobile apps) or if in whitelist
     if (!origin || allowedOrigins.includes(origin) || origin.endsWith('.vercel.app')) {
       callback(null, true);
     } else {
@@ -72,8 +72,14 @@ const backfillLegacyCampus = async () => {
       { $set: { campus: 'Emerald Campus' } }
     );
 
-    if (studentRes.modifiedCount > 0 || userRes.modifiedCount > 0) {
-      console.log(`✅ Legacy Campus Backfill: Assigned 'Emerald Campus' to ${studentRes.modifiedCount} students and ${userRes.modifiedCount} staff members.`);
+    // 🔒 Backfill legacy fee structures missing campus field
+    const feeRes = await FeeStructure.updateMany(
+      { $or: [{ campus: { $exists: false } }, { campus: null }, { campus: '' }] },
+      { $set: { campus: 'Emerald Campus' } }
+    );
+
+    if (studentRes.modifiedCount > 0 || userRes.modifiedCount > 0 || feeRes.modifiedCount > 0) {
+      console.log(`✅ Legacy Campus Backfill: Assigned 'Emerald Campus' to ${studentRes.modifiedCount} students, ${userRes.modifiedCount} staff members, and ${feeRes.modifiedCount} fee structures.`);
     }
   } catch (err) {
     console.error('⚠️ Campus backfill execution notice:', err.message);
