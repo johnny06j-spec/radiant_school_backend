@@ -8,7 +8,7 @@ import { normalizeClassName } from './financeHelpers.js';
 // @route POST /api/finance/structure
 export const saveFeeStructure = async (req, res) => {
   try {
-    const { className, items, campus, targetCampus: payloadTargetCampus } = req.body;
+    const { className, items, campus, targetCampus } = req.body;
 
     if (!className || className === 'Select Class') {
       return res.status(400).json({ success: false, message: "Please select a valid school class level." });
@@ -18,16 +18,18 @@ export const saveFeeStructure = async (req, res) => {
       return res.status(400).json({ success: false, message: "Fee structure must contain at least one fee item." });
     }
 
-    // 🟢 SANITIZE CAMPUS INPUT
-    let rawCampus = payloadTargetCampus || campus;
-    if (Array.isArray(rawCampus)) {
-      rawCampus = rawCampus[0];
-    } else if (typeof rawCampus === 'string' && rawCampus.includes(',')) {
-      rawCampus = rawCampus.split(',')[0];
+    // 🟢 PRIORITIZE EXPLICIT TARGET CAMPUS OVER GLOBAL FILTER
+    let selectedCampus = targetCampus || campus;
+
+    if (Array.isArray(selectedCampus)) {
+      selectedCampus = selectedCampus[0];
+    } else if (typeof selectedCampus === 'string' && selectedCampus.includes(',')) {
+      selectedCampus = selectedCampus.split(',')[0];
     }
 
-    let finalCampus = (rawCampus && String(rawCampus).trim() !== '' && rawCampus !== 'All Campuses') 
-      ? String(rawCampus).trim() 
+    // Strictly validate valid campus names and reject 'All Campuses' fallback collisions
+    const finalCampus = (selectedCampus && String(selectedCampus).trim() !== '' && selectedCampus !== 'All Campuses') 
+      ? String(selectedCampus).trim() 
       : 'Emerald Campus';
 
     // 🔒 1. FETCH AND ENFORCE ACTIVE SESSION & TERM FROM SYSTEM CONFIG
@@ -49,19 +51,19 @@ export const saveFeeStructure = async (req, res) => {
       .filter(item => item.checked !== false)
       .reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
 
-    // 🔒 2. UPSERT STRUCTURE LOCKED TO ACTIVE SESSION, TERM & TARGET CAMPUS
+    // 🔒 2. UPSERT STRUCTURE STRICTLY ISOLATED TO THE TARGET CAMPUS
     const structure = await FeeStructure.findOneAndUpdate(
       {
         className: normalizedClass,
         session: activeSession,
         term: activeTerm,
-        campus: finalCampus
+        campus: finalCampus // 👈 Strictly queries BY FINAL TARGET CAMPUS
       },
       {
         className: normalizedClass,
         session: activeSession,
         term: activeTerm,
-        campus: finalCampus,
+        campus: finalCampus, // 👈 Explicitly assigns target campus
         items: items.map(i => ({
           name: i.name.trim(),
           amount: Number(i.amount) || 0,
@@ -74,14 +76,14 @@ export const saveFeeStructure = async (req, res) => {
       { new: true, upsert: true, runValidators: true }
     );
 
-    res.status(200).json({
+    return res.status(200).json({
       success: true,
-      message: `Fee structure for ${normalizedClass} - ${finalCampus} (${activeSession} - ${activeTerm}) committed successfully!`,
+      message: `Fee structure for ${normalizedClass} - ${finalCampus} (${activeSession} - ${activeTerm}) saved successfully!`,
       data: structure
     });
   } catch (error) {
     console.error("Save fee structure transaction failure:", error);
-    res.status(500).json({ success: false, message: error.message });
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 
