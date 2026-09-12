@@ -15,6 +15,7 @@ export const approveResultByPrincipal = async (req, res) => {
       term, 
       session, 
       className, 
+      campus: bodyCampus,
       schoolSection, 
       principalRemark, 
       executiveRemark,
@@ -27,7 +28,13 @@ export const approveResultByPrincipal = async (req, res) => {
       return res.status(400).json({ success: false, message: "Missing student metadata parameters." });
     }
 
-    const studentDoc = await Student.findById(studentId).select('name surname firstname firstName admissionNo registrationNo currentClass').lean();
+    // 🔒 Enforce Campus Binding
+    const activeCampus = bodyCampus || req.user?.campus || 'Emerald Campus';
+
+    const studentDoc = await Student.findById(studentId)
+      .select('name surname firstname firstName admissionNo registrationNo currentClass campus')
+      .lean();
+
     const cleanClass = (className || studentDoc?.currentClass || '').trim();
     const displayName = studentDoc?.name || `${studentDoc?.surname || ''} ${studentDoc?.firstname || studentDoc?.firstName || ''}`.trim() || 'Student';
     const displayAdm = studentDoc?.admissionNo || studentDoc?.registrationNo || 'N/A';
@@ -37,13 +44,14 @@ export const approveResultByPrincipal = async (req, res) => {
     const finalNextClass = (isThirdTerm && finalPromotion === 'PROMOTED') ? (promotedToClass || '') : '';
     const remark = principalRemark || executiveRemark || 'Satisfactory academic performance.';
 
-    // 1. Force the engine to calculate canonical cumulative scores (with Brought Forward)
+    // 1. Force the engine to calculate canonical cumulative scores scoped by campus
     const computedData = await buildStudentResultSubjects({
       studentId,
       studentDoc,
       className: cleanClass,
       term: term.trim(),
-      session: session.trim()
+      session: session.trim(),
+      campus: activeCampus
     });
 
     const finalSubjects = computedData?.subjects?.length > 0 ? computedData.subjects : [];
@@ -51,13 +59,14 @@ export const approveResultByPrincipal = async (req, res) => {
       ? Number(computedData.overallAverage) 
       : 0;
 
-    const finalOverallGrade = computedData.overallGrade || 'A';
+    const finalOverallGrade = computedData?.overallGrade || 'A';
 
     const updateFields = {
       studentId,
       name: displayName,
       admissionNo: displayAdm,
       className: cleanClass,
+      campus: activeCampus, // 🔒 Campus Stamped
       schoolSection: schoolSection || 'PRIMARY',
       term: term.trim(),
       session: session.trim(),
@@ -75,16 +84,19 @@ export const approveResultByPrincipal = async (req, res) => {
       overallGrade: finalOverallGrade
     };
 
+    // 🔒 Query scoped by Campus
     const updatedReview = await ResultReview.findOneAndUpdate(
-      { studentId, term: term.trim(), session: session.trim() },
+      { studentId, term: term.trim(), session: session.trim(), campus: activeCampus },
       { $set: updateFields },
       { new: true, upsert: true }
     );
 
     if (cleanClass) {
       const classRegex = new RegExp(`^${cleanClass.replace(/\s+/g, '\\s*')}$`, 'i');
+      
+      // 🔒 Scoped GradingGrid updates to target campus
       await GradingGrid.updateMany(
-        { className: classRegex, term: term.trim(), session: session.trim() },
+        { className: classRegex, term: term.trim(), session: session.trim(), campus: activeCampus },
         { 
           $set: { 
             status: 'Approved', 
@@ -99,7 +111,6 @@ export const approveResultByPrincipal = async (req, res) => {
       );
     }
 
-    // 🟢 Class promotion decision is stamped on ResultReview and executed on new session rollover.
     return res.status(200).json({
       success: true,
       message: `Result for ${displayName} approved successfully! Promotion decision stamped.`,
@@ -117,14 +128,17 @@ export const approveResultByPrincipal = async (req, res) => {
  */
 export const rejectResultByPrincipal = async (req, res) => {
   try {
-    const { studentId, term, session, rejectionReason } = req.body;
+    const { studentId, term, session, rejectionReason, campus: bodyCampus } = req.body;
 
     if (!studentId || !rejectionReason) {
       return res.status(400).json({ success: false, message: "Please provide a reason for returning the result." });
     }
 
+    // 🔒 Enforce Campus Binding
+    const activeCampus = bodyCampus || req.user?.campus || 'Emerald Campus';
+
     const updatedReview = await ResultReview.findOneAndUpdate(
-      { studentId, term: term.trim(), session: session.trim() },
+      { studentId, term: term.trim(), session: session.trim(), campus: activeCampus },
       { 
         $set: { 
           status: 'Returned for Revision', 
@@ -140,8 +154,10 @@ export const rejectResultByPrincipal = async (req, res) => {
 
     if (updatedReview?.className) {
       const classRegex = new RegExp(`^${updatedReview.className.trim().replace(/\s+/g, '\\s*')}$`, 'i');
+      
+      // 🔒 Scoped GradingGrid updates by campus
       await GradingGrid.updateMany(
-        { className: classRegex, term: term.trim(), session: session.trim() },
+        { className: classRegex, term: term.trim(), session: session.trim(), campus: activeCampus },
         { 
           $set: { 
             status: 'Returned for Revision', 
@@ -171,7 +187,7 @@ export const rejectResultByPrincipal = async (req, res) => {
  */
 export const adminReturnResultsToHM = async (req, res) => {
   try {
-    const { className, term, session, rejectionReason, reason } = req.body;
+    const { className, term, session, rejectionReason, reason, campus: bodyCampus } = req.body;
 
     if (!className || !term || !session) {
       return res.status(400).json({ 
@@ -180,12 +196,20 @@ export const adminReturnResultsToHM = async (req, res) => {
       });
     }
 
+    // 🔒 Enforce Campus Context
+    const activeCampus = bodyCampus || req.user?.campus || 'Emerald Campus';
+
     const cleanClass = className.trim();
     const classRegex = new RegExp(`^${cleanClass.replace(/\s+/g, '\\s*')}$`, 'i');
     const finalReason = (rejectionReason || reason || 'Returned by Admin for revision.').trim();
 
+    const reviewFilter = { className: classRegex, term: term.trim(), session: session.trim() };
+    if (activeCampus && activeCampus !== 'All Campuses') {
+      reviewFilter.campus = activeCampus;
+    }
+
     const reviewResult = await ResultReview.updateMany(
-      { className: classRegex, term: term.trim(), session: session.trim() },
+      reviewFilter,
       {
         $set: {
           status: 'Returned for Revision',
@@ -199,8 +223,13 @@ export const adminReturnResultsToHM = async (req, res) => {
       }
     );
 
+    const gridFilter = { className: classRegex, term: term.trim(), session: session.trim() };
+    if (activeCampus && activeCampus !== 'All Campuses') {
+      gridFilter.campus = activeCampus;
+    }
+
     await GradingGrid.updateMany(
-      { className: classRegex, term: term.trim(), session: session.trim() },
+      gridFilter,
       { 
         $set: { 
           status: 'Returned for Revision', 
