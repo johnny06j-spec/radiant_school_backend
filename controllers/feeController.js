@@ -97,7 +97,11 @@ export const getFeeStructures = async (req, res) => {
     if (session) filter.session = session;
     if (term) filter.term = term;
     if (className) filter.className = normalizeClassName(className);
-    if (campus && campus !== 'All Campuses') filter.campus = campus;
+
+    // Only apply campus filter if it is NOT 'All Campuses' or undefined strings
+    if (campus && campus !== 'All Campuses' && campus !== 'undefined') {
+      filter.campus = campus;
+    }
 
     const structures = await FeeStructure.find(filter).sort({ createdAt: -1 });
     
