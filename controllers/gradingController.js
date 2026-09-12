@@ -13,14 +13,14 @@ const normalizeName = (nameStr) => {
 
 /**
  * @route   GET /api/teachers/fetch-grid
- * @desc    Fetch grading grid sheet and sync against live student roster (purges deleted students)
+ * @desc    Fetch grading grid sheet strictly filtered by class AND campus
  * @access  Private (Teacher/Staff)
  */
 export const fetchGradingGrid = async (req, res) => {
   try {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, private');
 
-    const { className, subjectName, term, session } = req.query;
+    const { className, subjectName, term, session, campus } = req.query;
 
     if (!className || !subjectName) {
       return res.status(400).json({
@@ -28,6 +28,11 @@ export const fetchGradingGrid = async (req, res) => {
         message: "Missing className or subjectName query parameters."
       });
     }
+
+    // Determine target campus from request or authenticated user profile
+    const targetCampus = (campus && campus !== 'All Campuses' && campus !== 'undefined')
+      ? campus.trim()
+      : (req.user?.campus || 'Emerald Campus');
 
     const cleanClass = className.trim();
     const cleanSubject = subjectName.trim();
@@ -47,7 +52,8 @@ export const fetchGradingGrid = async (req, res) => {
         className: classRegex,
         subjectName: new RegExp(`^${cleanSubject.replace(/\s+/g, '\\s*')}$`, 'i'),
         term: previousTerm,
-        session
+        session,
+        campus: targetCampus // 👈 Campus-isolated prior term check
       }).lean();
 
       if (prevGrid && prevGrid.studentsScores) {
@@ -69,17 +75,26 @@ export const fetchGradingGrid = async (req, res) => {
       return prevScoreById[cleanId] ?? prevScoreById[cleanAdm] ?? prevScoreByName[cleanName] ?? 0;
     };
 
-    // 2. Fetch Live Active Students Enrolled strictly in this Class
-    const currentEnrolledStudents = await Student.find({
+    // 2. Fetch Live Active Students Enrolled STRICTLY in this Class AND Campus
+    const studentQuery = {
       $or: [
         { currentClass: classRegex },
         { assignedClass: classRegex },
         { className: classRegex },
         { class: classRegex }
-      ]
-    }).sort({ surname: 1, firstname: 1, firstName: 1, name: 1 }).lean();
+      ],
+      status: { $in: ['Active', 'active', null] }
+    };
 
-    // Build fast lookup sets for active students
+    if (targetCampus) {
+      studentQuery.campus = targetCampus; // 🔒 Filter by Campus
+    }
+
+    const currentEnrolledStudents = await Student.find(studentQuery)
+      .sort({ surname: 1, firstname: 1, firstName: 1, name: 1 })
+      .lean();
+
+    // Build fast lookup sets for active campus students
     const activeStudentIds = new Set(currentEnrolledStudents.map(s => s._id.toString()));
     const activeAdmissions = new Set(
       currentEnrolledStudents
@@ -90,17 +105,18 @@ export const fetchGradingGrid = async (req, res) => {
       currentEnrolledStudents.map(s => normalizeName(s.name || `${s.surname || ''} ${s.firstname || s.firstName || ''}`))
     );
 
-    // 🟢 LOCK CHECK MUST BE STRICTLY SCOPED TO EXACT className, subjectName, term, AND session
+    // 🟢 FETCH GRID MATCHING CAMPUS, CLASS, SUBJECT, TERM, SESSION
     let grid = await GradingGrid.findOne({
       className: classRegex,
       subjectName: new RegExp(`^${cleanSubject.replace(/\s+/g, '\\s*')}$`, 'i'),
       term: term.trim(),
-      session: session.trim()
+      session: session.trim(),
+      campus: targetCampus // 👈 Match Campus
     });
 
     // 3. Initialize or Sync Grid
     if (!grid || !grid.studentsScores || grid.studentsScores.length === 0) {
-      // Fresh Grid for Active Students Only
+      // Fresh Grid for Active Campus Students Only
       const studentsScores = currentEnrolledStudents.map(student => {
         const studentFullName = student.name 
           ? student.name 
@@ -124,6 +140,7 @@ export const fetchGradingGrid = async (req, res) => {
         subjectName: cleanSubject,
         term,
         session,
+        campus: targetCampus,
         status: 'Draft',
         studentsScores
       };
@@ -132,7 +149,7 @@ export const fetchGradingGrid = async (req, res) => {
       const seenIds = new Set();
       const uniqueSavedScores = [];
 
-      // STEP A: Keep only saved score rows belonging to STILL-EXISTING active students
+      // STEP A: Keep only saved score rows belonging to active campus students
       grid.studentsScores.forEach(row => {
         const rowIdStr = (row.studentId || row.id || '').toString();
         const rowAdmStr = (row.admissionNo || '').toString().trim().toUpperCase();
@@ -156,7 +173,7 @@ export const fetchGradingGrid = async (req, res) => {
         }
       });
 
-      // STEP B: Append any NEWLY ENROLLED students not yet in the saved grid
+      // STEP B: Append any NEWLY ENROLLED campus students not yet in grid
       currentEnrolledStudents.forEach(student => {
         const studentFullName = student.name 
           ? student.name 
@@ -218,16 +235,20 @@ export const fetchGradingGrid = async (req, res) => {
 
 /**
  * @route   POST /api/teachers/save-grid
- * @desc    Save grading grid draft (strips deleted students before saving)
+ * @desc    Save grading grid draft with campus binding
  * @access  Private (Teacher/Staff)
  */
 export const saveGradingGridDraft = async (req, res) => {
   try {
-    const { className, schoolSection, subjectName, term, session, studentsScores } = req.body;
+    const { className, schoolSection, subjectName, term, session, campus, studentsScores } = req.body;
 
     if (!className || !subjectName || !studentsScores) {
       return res.status(400).json({ success: false, message: "Please provide complete grid metadata payload." });
     }
+
+    const targetCampus = (campus && campus !== 'All Campuses') 
+      ? campus.trim() 
+      : (req.user?.campus || 'Emerald Campus');
 
     const cleanClass = className.trim();
     const classPattern = cleanClass.replace(/\s+/g, '\\s*');
@@ -239,10 +260,10 @@ export const saveGradingGridDraft = async (req, res) => {
         { assignedClass: classRegex },
         { className: classRegex },
         { class: classRegex }
-      ]
+      ],
+      campus: targetCampus // 👈 Restrict matched students to target campus
     }).lean();
 
-    // Map and sanitize incoming scores, dropping any orphan records
     const sanitizedScores = studentsScores
       .map((row) => {
         const rowName = normalizeName(row.name || '');
@@ -274,7 +295,8 @@ export const saveGradingGridDraft = async (req, res) => {
         className: classRegex, 
         subjectName: new RegExp(`^${subjectName.trim().replace(/\s+/g, '\\s*')}$`, 'i'), 
         term: term.trim(), 
-        session: session.trim() 
+        session: session.trim(),
+        campus: targetCampus // 👈 Isolated update by campus
       },
       {
         $set: {
@@ -283,6 +305,7 @@ export const saveGradingGridDraft = async (req, res) => {
           subjectName: subjectName.trim(),
           term: term.trim(),
           session: session.trim(),
+          campus: targetCampus,
           studentsScores: sanitizedScores,
           status: 'Draft',
           updatedAt: new Date()
@@ -309,12 +332,12 @@ export const saveGradingGridDraft = async (req, res) => {
 
 /**
  * @route   POST /api/teachers/submit-broadsheet
- * @desc    Submit result broadsheet to Principal / Executive for review (locks the specific class)
+ * @desc    Submit result broadsheet filtered strictly by class and campus
  * @access  Private (Teacher/Staff)
  */
 export const submitBroadsheetToPrincipal = async (req, res) => {
   try {
-    const { className, term, session } = req.body;
+    const { className, term, session, campus } = req.body;
 
     if (!className || !term || !session) {
       return res.status(400).json({
@@ -323,16 +346,22 @@ export const submitBroadsheetToPrincipal = async (req, res) => {
       });
     }
 
+    const targetCampus = campus || req.user?.campus || 'Emerald Campus';
     const cleanClass = className.trim();
     const classRegex = new RegExp(`^${cleanClass.replace(/\s+/g, '\\s*')}$`, 'i');
 
-    // 🟢 ONLY UPDATE GRIDS BELONGING TO THIS SPECIFIC CLASS
+    const gridFilter = { 
+      className: classRegex, 
+      term: term.trim(), 
+      session: session.trim() 
+    };
+
+    if (targetCampus && targetCampus !== 'All Campuses') {
+      gridFilter.campus = targetCampus;
+    }
+
     const updateResult = await GradingGrid.updateMany(
-      { 
-        className: classRegex, 
-        term: term.trim(), 
-        session: session.trim() 
-      },
+      gridFilter,
       { 
         $set: { status: 'Submitted for Review', updatedAt: new Date() } 
       }
@@ -340,7 +369,7 @@ export const submitBroadsheetToPrincipal = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: `Broadsheet for ${cleanClass} (${term}, ${session}) successfully submitted for Principal approval!`,
+      message: `Broadsheet for ${cleanClass} - ${targetCampus} (${term}, ${session}) successfully submitted for Principal approval!`,
       modifiedCount: updateResult.modifiedCount
     });
   } catch (error) {
@@ -371,7 +400,6 @@ export const getMyResults = async (req, res) => {
     const selectedTerm = (term || "First Term").trim();
     const selectedSession = (session || "2026/2027").trim();
 
-    // 1. Fetch ResultReview record
     const review = await ResultReview.findOne({
       studentId: student._id,
       session: selectedSession,
@@ -390,7 +418,6 @@ export const getMyResults = async (req, res) => {
       });
     }
 
-    // 2. 🟢 CUMULATIVE FINANCIAL CLEARANCE CALCULATION (UP TO TARGET TERM)
     const basePreviousOutstanding = Number(student.previousOutstanding) || 0;
 
     const allStructures = await FeeStructure.find({}).lean();
@@ -418,8 +445,11 @@ export const getMyResults = async (req, res) => {
       if (isUpToTarget) {
         const studentClass = (student.currentClass || student.assignedClass || '').trim().toUpperCase();
         const structClass = (struct.className || '').trim().toUpperCase();
+        const studentCampus = (student.campus || 'Emerald Campus').trim();
+        const structCampus = (struct.campus || 'Emerald Campus').trim();
 
-        if (structClass === studentClass || structClass.replace(/\s+/g, '') === studentClass.replace(/\s+/g, '')) {
+        // 🔒 Fee Match by Class & Campus
+        if ((structClass === studentClass || structClass.replace(/\s+/g, '') === studentClass.replace(/\s+/g, '')) && structCampus === studentCampus) {
           struct.items?.forEach(item => {
             if (item.checked !== false) {
               cumulativeFeesExpected += Number(item.amount) || 0;
