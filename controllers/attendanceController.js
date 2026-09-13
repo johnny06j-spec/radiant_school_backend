@@ -7,13 +7,28 @@ import User from '../models/User.js';
  * Helper to check if logged-in teacher is assigned to the class
  */
 const verifyClassTeacher = (reqUser, targetClass) => {
-  // Allow system admins or executive users bypass
-  if (reqUser?.role === 'Admin' || reqUser?.role === 'Executive') return true;
-  
-  // Verify assigned class matches target class
-  const assigned = reqUser?.assignedClass || reqUser?.classTeacherOf;
+  if (!reqUser) return false;
+
+  // 1. Executive / Admin Role Bypass
+  const userRole = reqUser.role?.toLowerCase() || '';
+  if (['admin', 'executive', 'headmaster', 'principal'].includes(userRole)) {
+    return true;
+  }
+
+  // 2. Primary / Nursery Auto-Assignment Rule
+  // Primary teachers automatically manage attendance for their assigned classroom
+  const isPrimary = reqUser.schoolSection === 'PRIMARY' || reqUser.schoolSection === 'NURSERY';
+  const assigned = reqUser.assignedClass || reqUser.classTeacherOf;
+
+  if (isPrimary && assigned) {
+    // If selecting their primary class or if primary teacher has access to their class sheet
+    if (assigned.trim().toLowerCase() === targetClass.trim().toLowerCase()) {
+      return true;
+    }
+  }
+
+  // 3. Secondary Explicit Assignment Rule
   if (!assigned) return false;
-  
   return assigned.trim().toLowerCase() === targetClass.trim().toLowerCase();
 };
 
