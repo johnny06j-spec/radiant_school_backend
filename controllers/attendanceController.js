@@ -1,121 +1,126 @@
 // controllers/attendanceController.js
 import Attendance from '../models/Attendance.js';
 import Student from '../models/Student.js';
+import User from '../models/User.js';
 
 /**
- * @route   GET /api/attendance/sheet
- * @desc    Fetch student roster for a specific class on a target date with existing status
+ * Helper to check if logged-in teacher is assigned to the class
+ */
+const verifyClassTeacher = (reqUser, targetClass) => {
+  // Allow system admins or executive users bypass
+  if (reqUser.role === 'Admin' || reqUser.role === 'Executive') return true;
+  
+  // Verify assigned class matches target class
+  const assigned = reqUser.assignedClass || reqUser.classTeacherOf;
+  if (!assigned) return false;
+  
+  return assigned.trim().toLowerCase() === targetClass.trim().toLowerCase();
+};
+
+/**
+ * GET /api/attendance/class-sheet
  */
 export const getClassAttendanceSheet = async (req, res) => {
   try {
-    const { className, date } = req.query;
-    const user = req.user;
+    const { className, date, sessionPeriod = 'Morning', campus } = req.query;
 
-    if (!className || !date) {
-      return res.status(400).json({ success: false, message: "Class name and target date are required." });
+    if (!className) {
+      return res.status(400).json({ success: false, message: 'Class name is required.' });
     }
 
-    // 🔒 Security Permission Guard: Must be Class Teacher of this specific class OR Admin
-    if (user.role !== 'admin' && (!user.isClassTeacher || user.classTeacherOf !== className.trim())) {
+    // 🔒 Class Teacher Access Lock
+    if (!verifyClassTeacher(req.user, className)) {
       return res.status(403).json({
         success: false,
-        message: `Permission Denied: You are not authorized as the official Class Teacher for ${className}.`
+        isNotClassTeacher: true,
+        message: `Access denied. Only the assigned Class Teacher for ${className} can manage attendance.`
       });
     }
 
-    // 1. Fetch active students in this class
-    const students = await Student.find({ currentClass: className.trim() }).sort({ name: 1 }).lean();
+    const activeCampus = campus || req.user?.campus || 'Emerald Campus';
+    const targetDate = new Date(date);
+    targetDate.setHours(0, 0, 0, 0);
 
-    // 2. Fetch attendance document if already marked for this date
-    const existingRegister = await Attendance.findOne({
-      className: className.trim(),
-      date: date.trim()
+    const students = await Student.find({ currentClass: className, campus: activeCampus })
+      .select('name surname firstName admissionNo passportPhoto')
+      .sort({ surname: 1, firstName: 1 })
+      .lean();
+
+    const existingAttendance = await Attendance.find({
+      className,
+      campus: activeCampus,
+      sessionPeriod,
+      date: {
+        $gte: targetDate,
+        $lt: new Date(targetDate.getTime() + 24 * 60 * 60 * 1000)
+      }
     }).lean();
 
-    const existingMap = {};
-    if (existingRegister && existingRegister.records) {
-      existingRegister.records.forEach(r => {
-        existingMap[r.student.toString()] = r;
-      });
-    }
+    const attendanceMap = new Map(existingAttendance.map(a => [a.studentId.toString(), a]));
 
-    // 3. Build active attendance sheet
-    const sheet = students.map(st => {
-      const rec = existingMap[st._id.toString()] || {};
+    const formattedList = students.map(st => {
+      const record = attendanceMap.get(st._id.toString());
       return {
         studentId: st._id,
-        name: st.name,
-        admissionNo: st.admissionNo || st.regNumber || 'N/A',
-        status: rec.status || 'PRESENT',
-        remark: rec.remark || ''
+        name: st.name || `${st.surname || ''} ${st.firstName || ''}`.trim(),
+        admissionNo: st.admissionNo,
+        status: record ? record.status : 'Present',
+        remark: record ? record.remark : ''
       };
     });
 
-    return res.status(200).json({
-      success: true,
-      className,
-      date,
-      totalStudents: students.length,
-      isSubmitted: Boolean(existingRegister),
-      records: sheet
-    });
-
+    return res.status(200).json({ success: true, data: formattedList });
   } catch (error) {
-    console.error("💥 Attendance sheet fetch error:", error);
-    return res.status(500).json({ success: false, message: "Error fetching attendance sheet.", error: error.message });
+    return res.status(500).json({ success: false, message: error.message });
   }
 };
 
 /**
- * @route   POST /api/attendance/submit
- * @desc    Save daily attendance register for a class
+ * POST /api/attendance/save
  */
-export const submitClassAttendance = async (req, res) => {
+export const saveClassAttendance = async (req, res) => {
   try {
-    const { className, date, records } = req.body;
-    const user = req.user;
+    const { className, date, sessionPeriod, term, session, campus, records } = req.body;
 
-    if (!className || !date || !Array.isArray(records)) {
-      return res.status(400).json({ success: false, message: "Invalid attendance register payload." });
-    }
-
-    // 🔒 Security Permission Guard
-    if (user.role !== 'admin' && (!user.isClassTeacher || user.classTeacherOf !== className.trim())) {
+    // 🔒 Class Teacher Access Lock
+    if (!verifyClassTeacher(req.user, className)) {
       return res.status(403).json({
         success: false,
-        message: `Permission Denied: You are not authorized to mark attendance for ${className}.`
+        message: `Unauthorized attempt. You are not assigned as Class Teacher for ${className}.`
       });
     }
 
-    const formattedRecords = records.map(r => ({
-      student: r.studentId,
-      name: r.name,
-      admissionNo: r.admissionNo,
-      status: r.status || 'PRESENT',
-      remark: r.remark || ''
+    const classTeacherId = req.user._id;
+    const activeCampus = campus || req.user?.campus || 'Emerald Campus';
+
+    const targetDate = new Date(date);
+    targetDate.setHours(0, 0, 0, 0);
+
+    const bulkOps = records.map(rec => ({
+      updateOne: {
+        filter: { 
+          studentId: rec.studentId, 
+          date: targetDate, 
+          sessionPeriod: sessionPeriod || 'Morning' 
+        },
+        update: {
+          $set: {
+            classTeacherId,
+            className,
+            campus: activeCampus,
+            term,
+            session,
+            status: rec.status,
+            remark: rec.remark || ''
+          }
+        },
+        upsert: true
+      }
     }));
 
-    const attendanceDoc = await Attendance.findOneAndUpdate(
-      { className: className.trim(), date: date.trim() },
-      {
-        $set: {
-          className: className.trim(),
-          date: date.trim(),
-          recordedBy: user._id || user.id,
-          records: formattedRecords
-        }
-      },
-      { upsert: true, new: true }
-    );
-
-    return res.status(200).json({
-      success: true,
-      message: `Daily attendance for ${className} on ${date} saved successfully.`,
-      attendance: attendanceDoc
-    });
-
+    await Attendance.bulkWrite(bulkOps);
+    return res.status(200).json({ success: true, message: 'Attendance saved successfully.' });
   } catch (error) {
-    console.error("💥 Attendance submit exception:", error);
-    return res.status(500).json({ success: false, message: "Failed to submit attendance.", error: error.message });
+    return res.status(500).json({ success: false, message: error.message });
   }
 };

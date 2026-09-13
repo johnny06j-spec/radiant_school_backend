@@ -1,36 +1,19 @@
-// models/Attendance.js
 import mongoose from 'mongoose';
 
 const attendanceSchema = new mongoose.Schema({
-  className: { 
-    type: String, 
-    required: true 
-  },
-  date: { 
-    type: String, 
-    required: true // Format: "YYYY-MM-DD"
-  },
-  recordedBy: { 
-    type: mongoose.Schema.Types.ObjectId, 
-    ref: 'User',
-    required: true 
-  },
-  records: [
-    {
-      student: { type: mongoose.Schema.Types.ObjectId, ref: 'Student', required: true },
-      name: { type: String, required: true },
-      admissionNo: { type: String, required: true },
-      status: { 
-        type: String, 
-        enum: ['PRESENT', 'ABSENT', 'LATE', 'EXCUSED'], 
-        default: 'PRESENT' 
-      },
-      remark: { type: String, default: '' }
-    }
-  ]
+  studentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Student', required: true },
+  classTeacherId: { type: mongoose.Schema.Types.ObjectId, ref: 'Teacher', required: true },
+  className: { type: String, required: true },
+  campus: { type: String, required: true, default: 'Emerald Campus' },
+  term: { type: String, required: true },
+  session: { type: String, required: true },
+  date: { type: Date, required: true },
+  sessionPeriod: { type: String, enum: ['Morning', 'Afternoon'], default: 'Morning' },
+  status: { type: String, enum: ['Present', 'Late', 'Absent', 'Excused'], default: 'Present' },
+  remark: { type: String, default: '' }
 }, { timestamps: true });
 
-// Ensure one register per class per date
-attendanceSchema.index({ className: 1, date: 1 }, { unique: true });
+// Prevent duplicate entries for the same student on the same date/session period
+attendanceSchema.index({ studentId: 1, date: 1, sessionPeriod: 1 }, { unique: true });
 
 export default mongoose.model('Attendance', attendanceSchema);
