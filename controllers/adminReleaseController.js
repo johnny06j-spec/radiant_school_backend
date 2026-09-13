@@ -14,7 +14,7 @@ export const getApprovedExecutiveReviews = async (req, res) => {
     res.setHeader('Pragma', 'no-cache');
     res.setHeader('Expires', '0');
 
-    const { className, term, session } = req.query;
+    const { className, term, session, campus: queryCampus } = req.query;
     if (!className || !term || !session) {
       return res.status(400).json({ 
         success: false, 
@@ -22,10 +22,13 @@ export const getApprovedExecutiveReviews = async (req, res) => {
       });
     }
 
+    // 🔒 Enforce Campus Context Binding
+    const activeCampus = queryCampus || req.user?.campus || 'Emerald Campus';
+
     const cleanClass = className.trim();
     const classRegex = new RegExp(`^${cleanClass.replace(/\s+/g, '\\s*')}$`, 'i');
 
-    const reviews = await ResultReview.find({
+    const queryFilter = {
       $or: [{ className: classRegex }, { class: classRegex }],
       term: term.trim(),
       session: session.trim(),
@@ -44,12 +47,18 @@ export const getApprovedExecutiveReviews = async (req, res) => {
         { status: { $ne: 'Released' } },
         { status: { $ne: 'Submitted' } }
       ]
-    }).lean();
+    };
+
+    if (activeCampus && activeCampus !== 'All Campuses') {
+      queryFilter.campus = activeCampus;
+    }
+
+    const reviews = await ResultReview.find(queryFilter).lean();
 
     const formattedReviews = await Promise.all(
       reviews.map(async (rev) => {
         const studentDoc = await Student.findById(rev.studentId)
-          .select('passportPhoto name surname firstName firstname admissionNo registrationNo currentClass')
+          .select('passportPhoto name surname firstName firstname admissionNo registrationNo currentClass campus')
           .lean()
           .catch(() => null);
 
@@ -66,6 +75,7 @@ export const getApprovedExecutiveReviews = async (req, res) => {
           name: displayName,
           admissionNo: displayAdm,
           className: rev.className || cleanClass,
+          campus: rev.campus || activeCampus,
           termAverage: verifiedAverage,
           overallAverage: verifiedAverage,
           executiveRemark: rev.principalRemark || rev.teacherRemark || 'Satisfactory academic performance.',
@@ -96,7 +106,7 @@ export const getApprovedExecutiveReviews = async (req, res) => {
  */
 export const adminReturnClassResults = async (req, res) => {
   try {
-    const { reviewId, studentId, className, term, session, reason, returnReason, rejectionReason } = req.body;
+    const { reviewId, studentId, className, term, session, reason, returnReason, rejectionReason, campus: bodyCampus } = req.body;
 
     const finalReason = (reason || returnReason || rejectionReason || '').trim();
     if (!finalReason) {
@@ -105,6 +115,9 @@ export const adminReturnClassResults = async (req, res) => {
         message: 'A specific reason for returning the result is required.' 
       });
     }
+
+    // 🔒 Enforce Campus Context
+    const activeCampus = bodyCampus || req.user?.campus || 'Emerald Campus';
 
     let targetQuery = {};
     if (reviewId && mongoose.Types.ObjectId.isValid(reviewId)) {
@@ -124,6 +137,10 @@ export const adminReturnClassResults = async (req, res) => {
       });
     }
 
+    if (activeCampus && activeCampus !== 'All Campuses') {
+      targetQuery.campus = activeCampus;
+    }
+
     const updatedReviews = await ResultReview.updateMany(targetQuery, {
       $set: {
         status: 'Returned for Revision',
@@ -139,8 +156,14 @@ export const adminReturnClassResults = async (req, res) => {
 
     if (className && term && session) {
       const classRegex = new RegExp(`^${className.trim().replace(/\s+/g, '\\s*')}$`, 'i');
+      const gridQuery = { className: classRegex, term: term.trim(), session: session.trim() };
+      
+      if (activeCampus && activeCampus !== 'All Campuses') {
+        gridQuery.campus = activeCampus;
+      }
+
       await GradingGrid.updateMany(
-        { className: classRegex, term: term.trim(), session: session.trim() },
+        gridQuery,
         { 
           $set: { 
             status: 'Returned for Revision', 
@@ -174,7 +197,7 @@ export const adminReturnClassResults = async (req, res) => {
  */
 export const releaseClassResults = async (req, res) => {
   try {
-    const { className, term, session } = req.body;
+    const { className, term, session, campus: bodyCampus } = req.body;
 
     if (!className || !term || !session) {
       return res.status(400).json({ 
@@ -183,10 +206,13 @@ export const releaseClassResults = async (req, res) => {
       });
     }
 
+    // 🔒 Enforce Campus Scope
+    const activeCampus = bodyCampus || req.user?.campus || 'Emerald Campus';
+
     const cleanClass = className.trim();
     const classRegex = new RegExp(`^${cleanClass.replace(/\s+/g, '\\s*')}$`, 'i');
 
-    const approvedReviews = await ResultReview.find({
+    const approvedFilter = {
       $or: [{ className: classRegex }, { class: classRegex }],
       term: term.trim(),
       session: session.trim(),
@@ -205,16 +231,21 @@ export const releaseClassResults = async (req, res) => {
         { status: { $ne: 'Released' } },
         { status: { $ne: 'Submitted' } }
       ]
-    });
+    };
+
+    if (activeCampus && activeCampus !== 'All Campuses') {
+      approvedFilter.campus = activeCampus;
+    }
+
+    const approvedReviews = await ResultReview.find(approvedFilter);
 
     if (approvedReviews.length === 0) {
       return res.status(400).json({ 
         success: false, 
-        message: 'No approved results ready for publication in this class.' 
+        message: `No approved results ready for publication in ${cleanClass} at ${activeCampus}.` 
       });
     }
 
-    // 🟢 Publish results to student portals without mutating live currentClass prematurely
     for (const review of approvedReviews) {
       await ResultReview.findByIdAndUpdate(review._id, {
         $set: {
@@ -225,8 +256,13 @@ export const releaseClassResults = async (req, res) => {
       });
     }
 
+    const gridFilter = { className: classRegex, term: term.trim(), session: session.trim() };
+    if (activeCampus && activeCampus !== 'All Campuses') {
+      gridFilter.campus = activeCampus;
+    }
+
     await GradingGrid.updateMany(
-      { className: classRegex, term: term.trim(), session: session.trim() },
+      gridFilter,
       { $set: { status: 'Released', releasedAt: new Date() } }
     );
 
@@ -253,15 +289,18 @@ export const getReleaseHistory = async (req, res) => {
   try {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
 
-    const { className, term, session } = req.query;
+    const { className, term, session, campus: queryCampus } = req.query;
+    const activeCampus = queryCampus || req.user?.campus;
+
     let query = { status: 'Released' };
 
     if (className) query.className = new RegExp(`^${className.trim().replace(/\s+/g, '\\s*')}$`, 'i');
     if (term) query.term = term.trim();
     if (session) query.session = session.trim();
+    if (activeCampus && activeCampus !== 'All Campuses') query.campus = activeCampus;
 
     const history = await ResultReview.find(query)
-      .populate('studentId', 'passportPhoto name surname firstName admissionNo')
+      .populate('studentId', 'passportPhoto name surname firstName admissionNo campus')
       .sort({ releasedAt: -1 })
       .lean();
 
@@ -271,6 +310,7 @@ export const getReleaseHistory = async (req, res) => {
       name: item.name || (item.studentId ? `${item.studentId.surname || ''} ${item.studentId.firstName || ''}`.trim() : 'Student'),
       admissionNo: item.admissionNo || item.studentId?.admissionNo || 'N/A',
       className: item.className,
+      campus: item.campus || activeCampus,
       term: item.term,
       session: item.session,
       overallAverage: Number(item.overallAverage || 0).toFixed(2),
@@ -302,7 +342,8 @@ export const searchStudentResults = async (req, res) => {
   try {
     res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
 
-    const { query: searchQuery, className } = req.query;
+    const { query: searchQuery, className, campus: queryCampus } = req.query;
+    const activeCampus = queryCampus || req.user?.campus;
 
     if (!searchQuery || !searchQuery.trim()) {
       return res.status(200).json({ success: true, data: [] });
@@ -324,9 +365,12 @@ export const searchStudentResults = async (req, res) => {
     if (className) {
       filter.className = new RegExp(`^${className.trim().replace(/\s+/g, '\\s*')}$`, 'i');
     }
+    if (activeCampus && activeCampus !== 'All Campuses') {
+      filter.campus = activeCampus;
+    }
 
     const results = await ResultReview.find(filter)
-      .populate('studentId', 'passportPhoto name surname firstName admissionNo')
+      .populate('studentId', 'passportPhoto name surname firstName admissionNo campus')
       .sort({ updatedAt: -1 })
       .limit(20)
       .lean();
@@ -354,16 +398,23 @@ export const deleteResultRecord = async (req, res) => {
   try {
     const { reviewId, id } = req.params;
     const targetId = reviewId || id;
-    const { className, term, session, studentId, admissionNo, studentName } = req.query;
+    const { className, term, session, studentId, admissionNo, studentName, campus: queryCampus } = req.query;
 
+    const activeCampus = queryCampus || req.user?.campus;
     const isMongoId = mongoose.Types.ObjectId.isValid(targetId);
 
-    if (isMongoId) {
-      await ResultReview.findByIdAndDelete(targetId).catch(() => null);
+    const deleteFilter = {};
+    if (isMongoId) deleteFilter._id = targetId;
+    if (activeCampus && activeCampus !== 'All Campuses') deleteFilter.campus = activeCampus;
+
+    if (Object.keys(deleteFilter).length > 0) {
+      await ResultReview.findOneAndDelete(deleteFilter).catch(() => null);
     }
     
     if (studentId && mongoose.Types.ObjectId.isValid(studentId)) {
-      await ResultReview.findOneAndDelete({ studentId }).catch(() => null);
+      const studentDeleteFilter = { studentId };
+      if (activeCampus && activeCampus !== 'All Campuses') studentDeleteFilter.campus = activeCampus;
+      await ResultReview.findOneAndDelete(studentDeleteFilter).catch(() => null);
     }
 
     const pullConditions = [];
@@ -399,6 +450,7 @@ export const deleteResultRecord = async (req, res) => {
     if (className) classFilter.className = new RegExp(`^${className.trim().replace(/\s+/g, '\\s*')}$`, 'i');
     if (term) classFilter.term = term;
     if (session) classFilter.session = session;
+    if (activeCampus && activeCampus !== 'All Campuses') classFilter.campus = activeCampus;
 
     await GradingGrid.updateMany(
       classFilter,
