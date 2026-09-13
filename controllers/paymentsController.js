@@ -1,46 +1,84 @@
 // controllers/paymentsController.js
 import StudentInvoice from '../models/StudentInvoice.js';
 import FeeStructure from '../models/FeeStructure.js';
+import Student from '../models/Student.js';
 
 // @desc Fetch or Dynamically Generate a Student's Ledger Sheet for a specific Term
 export const getStudentLedger = async (req, res) => {
   try {
-    // 🟢 Extract explicit studentId from params or query, falling back to req.user.id
     const targetStudentId = req.params.studentId || req.query.studentId || req.user?.id;
-    const { className, term, session, studentType, studentName } = req.query;
+    const { className, term, session, studentType, studentName, campus: queryCampus } = req.query;
 
-    if (!targetStudentId || !className || !term || !session) {
+    if (!targetStudentId) {
       return res.status(400).json({ 
         success: false, 
-        message: "Missing required core query parameters (studentId, className, term, session)." 
+        message: "Missing studentId parameter." 
       });
     }
 
-    let invoice = await StudentInvoice.findOne({ studentId: targetStudentId, term, session });
+    // 🔒 Enforce strict Campus resolution
+    let activeCampus = queryCampus || req.user?.campus;
+    
+    // Fetch student document if metadata (className/campus) is missing from request
+    const studentDoc = await Student.findById(targetStudentId)
+      .select('name surname firstname firstName currentClass assignedClass campus studentType')
+      .lean();
+
+    if (!activeCampus) {
+      activeCampus = studentDoc?.campus || 'Emerald Campus';
+    }
+
+    const targetClass = className || studentDoc?.currentClass || studentDoc?.assignedClass;
+    const resolvedStudentType = studentType || studentDoc?.studentType || 'Returning Students';
+
+    if (!targetClass || !term || !session) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Missing required core query parameters (className, term, session)." 
+      });
+    }
+
+    // 🔒 Query invoice isolated by campus
+    let invoice = await StudentInvoice.findOne({ 
+      studentId: targetStudentId, 
+      term: term.trim(), 
+      session: session.trim(),
+      campus: activeCampus 
+    });
 
     if (!invoice) {
-      const masterStructure = await FeeStructure.findOne({ className, term, session, status: 'Active' });
+      // 🔒 Find FeeStructure for the specific campus
+      const masterStructure = await FeeStructure.findOne({ 
+        className: targetClass.trim(), 
+        term: term.trim(), 
+        session: session.trim(), 
+        campus: activeCampus,
+        status: 'Active' 
+      });
       
       if (!masterStructure) {
         return res.status(404).json({ 
           success: false, 
-          message: `No active base fee structure layout found on the server for ${className} (${term}). Configure class fees first.` 
+          message: `No active base fee structure layout found for ${targetClass} (${term}) at ${activeCampus}.` 
         });
       }
 
       const assignedItems = masterStructure.items
-        .filter(item => item.checked && (item.appliesTo === 'All Students' || item.appliesTo === studentType))
+        .filter(item => item.checked && (item.appliesTo === 'All Students' || item.appliesTo === resolvedStudentType))
         .map(item => ({ name: item.name, amount: item.amount }));
 
       const totalAssigned = assignedItems.reduce((sum, item) => sum + item.amount, 0);
 
+      const resolvedName = studentName || studentDoc?.name || `${studentDoc?.firstName || ''} ${studentDoc?.surname || ''}`.trim() || "Unknown Student";
+
       invoice = await StudentInvoice.create({
         studentId: targetStudentId,
-        studentName: studentName || "Unknown Student",
-        className,
-        term,
-        session,
-        studentType: studentType || 'Returning Students',
+        studentName: resolvedName,
+        className: targetClass.trim(),
+        campus: activeCampus, // 🔒 Stamped
+        term: term.trim(),
+        session: session.trim(),
+        studentType: resolvedStudentType,
         feeItems: assignedItems,
         totalAssigned,
         totalPaid: 0,
@@ -79,7 +117,7 @@ export const postCollectionPayment = async (req, res) => {
       amountPaid: parseAmount,
       paymentMethod,
       reference,
-      receivedBy: adminName || "System Admin"
+      receivedBy: adminName || req.user?.name || "System Admin"
     });
 
     invoice.totalPaid += parseAmount;
