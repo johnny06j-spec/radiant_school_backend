@@ -1,11 +1,18 @@
 // routes/attendanceRoutes.js
 import express from 'express';
-import { getClassAttendanceSheet, submitClassAttendance } from '../controllers/attendanceController.js';
-import { verifyToken } from '../middleware/authMiddleware.js';
+import { 
+  getClassAttendanceSheet, 
+  saveClassAttendance, 
+  getWeeklyReportData, 
+  getStudentAttendanceHistory 
+} from '../controllers/attendanceController.js';
+import { protectTeacher, protectStudent } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
-router.get('/sheet', verifyToken, getClassAttendanceSheet);
-router.post('/submit', verifyToken, submitClassAttendance);
+router.get('/class-sheet', protectTeacher, getClassAttendanceSheet);
+router.post('/save', protectTeacher, saveClassAttendance);
+router.get('/weekly-report', protectTeacher, getWeeklyReportData);
+router.get('/student-portal', protectStudent, getStudentAttendanceHistory);
 
 export default router;
