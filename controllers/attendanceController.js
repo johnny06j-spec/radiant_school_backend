@@ -79,7 +79,8 @@ export const getClassAttendanceSheet = async (req, res) => {
         studentId: st._id,
         name: st.name || `${st.surname || ''} ${st.firstName || ''}`.trim(),
         admissionNo: st.admissionNo,
-        status: record ? record.status : 'Present',
+        // 🔑 Default to empty string so it shows as "-- Select --" / Unmarked
+        status: record ? record.status : '',
         remark: record ? record.remark : ''
       };
     });
