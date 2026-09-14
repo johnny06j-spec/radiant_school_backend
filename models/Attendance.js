@@ -1,3 +1,4 @@
+// models/Attendance.js
 import mongoose from 'mongoose';
 
 const attendanceSchema = new mongoose.Schema({
@@ -13,7 +14,7 @@ const attendanceSchema = new mongoose.Schema({
   remark: { type: String, default: '' }
 }, { timestamps: true });
 
-// Prevent duplicate entries for the same student on the same date/session period
+// 🔑 Unique compound index: prevents duplicate entries per student, date, and session period
 attendanceSchema.index({ studentId: 1, date: 1, sessionPeriod: 1 }, { unique: true });
 
-export default mongoose.model('Attendance', attendanceSchema);
+export default mongoose.models.Attendance || mongoose.model('Attendance', attendanceSchema);
