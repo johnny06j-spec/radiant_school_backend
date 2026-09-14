@@ -16,12 +16,10 @@ const verifyClassTeacher = (reqUser, targetClass) => {
   }
 
   // 2. Primary / Nursery Auto-Assignment Rule
-  // Primary teachers automatically manage attendance for their assigned classroom
   const isPrimary = reqUser.schoolSection === 'PRIMARY' || reqUser.schoolSection === 'NURSERY';
   const assigned = reqUser.assignedClass || reqUser.classTeacherOf;
 
   if (isPrimary && assigned) {
-    // If selecting their primary class or if primary teacher has access to their class sheet
     if (assigned.trim().toLowerCase() === targetClass.trim().toLowerCase()) {
       return true;
     }
@@ -79,7 +77,6 @@ export const getClassAttendanceSheet = async (req, res) => {
         studentId: st._id,
         name: st.name || `${st.surname || ''} ${st.firstName || ''}`.trim(),
         admissionNo: st.admissionNo,
-        // 🔑 Default to empty string so it shows as "-- Select --" / Unmarked
         status: record ? record.status : '',
         remark: record ? record.remark : ''
       };
@@ -146,27 +143,36 @@ export const saveClassAttendance = async (req, res) => {
  */
 export const getWeeklyReportData = async (req, res) => {
   try {
-    const { className, startDate, endDate, campus } = req.query;
+    const { className, startDate, endDate, sessionPeriod = 'Morning', campus } = req.query;
     const activeCampus = campus || req.user?.campus || 'Emerald Campus';
 
     const start = new Date(startDate || Date.now());
+    start.setHours(0, 0, 0, 0);
     const end = new Date(endDate || Date.now());
     end.setHours(23, 59, 59, 999);
 
     const students = await Student.find({ currentClass: className, campus: activeCampus })
       .select('name surname firstName admissionNo')
-      .sort({ surname: 1 })
+      .sort({ surname: 1, firstName: 1 })
       .lean();
 
     const attendanceRecords = await Attendance.find({
       className,
       campus: activeCampus,
+      sessionPeriod,
       date: { $gte: start, $lte: end }
     }).lean();
 
     const reportData = students.map(st => {
       const studentLogs = attendanceRecords.filter(r => r.studentId.toString() === st._id.toString());
       
+      // Index attendance status by YYYY-MM-DD string
+      const logsByDate = {};
+      studentLogs.forEach(log => {
+        const dStr = new Date(log.date).toISOString().split('T')[0];
+        logsByDate[dStr] = log.status;
+      });
+
       let present = 0, absent = 0, late = 0, excused = 0;
       studentLogs.forEach(log => {
         if (log.status === 'Present') present++;
@@ -189,6 +195,7 @@ export const getWeeklyReportData = async (req, res) => {
         late,
         excused,
         attendancePercentage,
+        logsByDate,
         logs: studentLogs
       };
     });
