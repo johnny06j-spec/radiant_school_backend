@@ -98,8 +98,8 @@ export const getFeeStructures = async (req, res) => {
     if (term) filter.term = term;
     if (className) filter.className = normalizeClassName(className);
 
-    // Only apply campus filter if it is NOT 'All Campuses' or undefined strings
-    if (campus && campus !== 'All Campuses' && campus !== 'undefined') {
+    // Flexible Campus Filter: Only apply if a specific campus (not "All Campuses" or "undefined") is requested
+    if (campus && campus !== 'All Campuses' && campus !== 'undefined' && campus !== 'null') {
       filter.campus = campus;
     }
 
