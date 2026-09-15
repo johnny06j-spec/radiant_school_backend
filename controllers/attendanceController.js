@@ -211,20 +211,41 @@ export const getWeeklyReportData = async (req, res) => {
  */
 export const getStudentAttendanceHistory = async (req, res) => {
   try {
-    const studentId = req.user?.studentId || req.user?._id || req.query.studentId;
     const { term: rawTerm, session: rawSession } = req.query;
+
+    // 1. Resolve target student ID (Support both linked Student record and explicit query)
+    let targetStudentId = req.query.studentId;
+
+    if (!targetStudentId && req.user) {
+      if (req.user.studentId) {
+        targetStudentId = req.user.studentId;
+      } else {
+        // Look up Student record matching this user account
+        const studentProfile = await Student.findOne({ 
+          $or: [{ user: req.user._id }, { _id: req.user._id }] 
+        }).select('_id').lean();
+
+        targetStudentId = studentProfile ? studentProfile._id : req.user._id;
+      }
+    }
 
     let termFilter = rawTerm;
     let sessionFilter = rawSession;
 
-    // Parse combined string e.g., "First Term (2026/2027)" into distinct parameters
+    // Parse combined term string e.g., "First Term (2026/2027)" into distinct parameters
     if (rawTerm && rawTerm.includes('(')) {
       const parts = rawTerm.split('(');
       termFilter = parts[0].trim();
       sessionFilter = parts[1].replace(')', '').trim();
     }
 
-    const filter = { studentId };
+    // 2. Query attendance with flexible ID matching
+    const filter = {
+      $or: [
+        { studentId: targetStudentId },
+        { student: targetStudentId }
+      ]
+    };
 
     if (termFilter) filter.term = termFilter;
     if (sessionFilter) filter.session = sessionFilter;
@@ -248,6 +269,7 @@ export const getStudentAttendanceHistory = async (req, res) => {
       records
     });
   } catch (error) {
+    console.error("💥 Error fetching student attendance history:", error);
     return res.status(500).json({ success: false, message: error.message });
   }
 };
