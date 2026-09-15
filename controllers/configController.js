@@ -20,9 +20,23 @@ export const getSystemConfig = async (req, res) => {
       });
     }
 
+    const session = config.currentSession;
+    const term = config.currentTerm;
+
     return res.status(200).json({
       success: true,
-      data: config
+      data: {
+        ...config.toObject(),
+        // Normalized properties for frontend consumption
+        activeTerm: term,
+        activeSession: session,
+        activeConfig: `${term} (${session})`,
+        termList: [
+          `First Term (${session})`,
+          `Second Term (${session})`,
+          `Third Term (${session})`
+        ]
+      }
     });
   } catch (error) {
     console.error("💥 System configuration fetch exception:", error);
