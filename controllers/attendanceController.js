@@ -211,12 +211,23 @@ export const getWeeklyReportData = async (req, res) => {
  */
 export const getStudentAttendanceHistory = async (req, res) => {
   try {
-    const studentId = req.user?._id || req.query.studentId;
-    const { term, session } = req.query;
+    const studentId = req.user?.studentId || req.user?._id || req.query.studentId;
+    const { term: rawTerm, session: rawSession } = req.query;
+
+    let termFilter = rawTerm;
+    let sessionFilter = rawSession;
+
+    // Parse combined string e.g., "First Term (2026/2027)" into distinct parameters
+    if (rawTerm && rawTerm.includes('(')) {
+      const parts = rawTerm.split('(');
+      termFilter = parts[0].trim();
+      sessionFilter = parts[1].replace(')', '').trim();
+    }
 
     const filter = { studentId };
-    if (term) filter.term = term;
-    if (session) filter.session = session;
+
+    if (termFilter) filter.term = termFilter;
+    if (sessionFilter) filter.session = sessionFilter;
 
     const records = await Attendance.find(filter).sort({ date: -1 }).lean();
 
