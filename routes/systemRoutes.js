@@ -11,8 +11,9 @@ import { verifyToken, isAdmin } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
-// 🟢 GET active global session & term settings
+// 🟢 GET active global session & term settings (Supports both path formats)
 router.get('/config', verifyToken, getSystemConfig);
+router.get('/academic-settings', verifyToken, getSystemConfig);
 
 // 🟢 PUT update global session & term settings (Admin only)
 router.put('/config', verifyToken, isAdmin, updateSystemConfig);
