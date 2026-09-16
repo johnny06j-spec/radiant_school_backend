@@ -13,7 +13,7 @@ import {
 
 // 2. Grading Grid Matrix
 import { 
-  fetchGradingGrid, 
+  fetchGradingGrid,
   saveGradingGridDraft 
 } from '../controllers/gradingController.js';
 

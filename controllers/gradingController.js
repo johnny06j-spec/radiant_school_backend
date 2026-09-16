@@ -53,7 +53,7 @@ export const fetchGradingGrid = async (req, res) => {
         subjectName: new RegExp(`^${cleanSubject.replace(/\s+/g, '\\s*')}$`, 'i'),
         term: previousTerm,
         session,
-        campus: targetCampus // 👈 Campus-isolated prior term check
+        campus: targetCampus // Campus-isolated prior term check
       }).lean();
 
       if (prevGrid && prevGrid.studentsScores) {
@@ -87,7 +87,7 @@ export const fetchGradingGrid = async (req, res) => {
     };
 
     if (targetCampus) {
-      studentQuery.campus = targetCampus; // 🔒 Filter by Campus
+      studentQuery.campus = targetCampus; // Filter by Campus
     }
 
     const currentEnrolledStudents = await Student.find(studentQuery)
@@ -105,13 +105,13 @@ export const fetchGradingGrid = async (req, res) => {
       currentEnrolledStudents.map(s => normalizeName(s.name || `${s.surname || ''} ${s.firstname || s.firstName || ''}`))
     );
 
-    // 🟢 FETCH GRID MATCHING CAMPUS, CLASS, SUBJECT, TERM, SESSION
+    // FETCH GRID MATCHING CAMPUS, CLASS, SUBJECT, TERM, SESSION
     let grid = await GradingGrid.findOne({
       className: classRegex,
       subjectName: new RegExp(`^${cleanSubject.replace(/\s+/g, '\\s*')}$`, 'i'),
       term: term.trim(),
       session: session.trim(),
-      campus: targetCampus // 👈 Match Campus
+      campus: targetCampus // Match Campus
     });
 
     // 3. Initialize or Sync Grid
@@ -235,23 +235,35 @@ export const fetchGradingGrid = async (req, res) => {
 
 /**
  * @route   POST /api/teachers/save-grid
- * @desc    Save grading grid draft with campus binding
+ * @desc    Save grading grid draft safely with campus binding (Upsert Logic)
  * @access  Private (Teacher/Staff)
  */
 export const saveGradingGridDraft = async (req, res) => {
   try {
-    const { className, schoolSection, subjectName, term, session, campus, studentsScores } = req.body;
+    const { 
+      className, schoolSection, subject, subjectName, 
+      term, session, campus, records, studentsScores 
+    } = req.body;
 
-    if (!className || !subjectName || !studentsScores) {
-      return res.status(400).json({ success: false, message: "Please provide complete grid metadata payload." });
+    const targetSubject = (subject || subjectName || '').trim();
+    const targetClass = (className || '').trim();
+    const targetTerm = (term || '').trim();
+    const targetSession = (session || '').trim();
+
+    const rawScores = Array.isArray(records) ? records : (Array.isArray(studentsScores) ? studentsScores : null);
+
+    if (!targetClass || !targetSubject || !targetTerm || !targetSession || !rawScores) {
+      return res.status(400).json({ 
+        success: false, 
+        message: "Please provide complete grid metadata payload (className, subject, term, session, records)." 
+      });
     }
 
     const targetCampus = (campus && campus !== 'All Campuses') 
       ? campus.trim() 
       : (req.user?.campus || 'Emerald Campus');
 
-    const cleanClass = className.trim();
-    const classPattern = cleanClass.replace(/\s+/g, '\\s*');
+    const classPattern = targetClass.replace(/\s+/g, '\\s*');
     const classRegex = new RegExp(`^${classPattern}$`, 'i');
 
     const realStudents = await Student.find({
@@ -261,12 +273,12 @@ export const saveGradingGridDraft = async (req, res) => {
         { className: classRegex },
         { class: classRegex }
       ],
-      campus: targetCampus // 👈 Restrict matched students to target campus
+      campus: targetCampus // Restrict matched students to target campus
     }).lean();
 
-    const sanitizedScores = studentsScores
+    const sanitizedScores = rawScores
       .map((row) => {
-        const rowName = normalizeName(row.name || '');
+        const rowName = normalizeName(row.name || row.studentName || '');
         const rowAdm = (row.admissionNo || '').trim().toUpperCase();
 
         const matchedStudent = realStudents.find(s => {
@@ -282,42 +294,64 @@ export const saveGradingGridDraft = async (req, res) => {
 
         if (!matchedStudent && !row.studentId) return null;
 
+        const ca1 = Number(row.ca1 ?? row.test1 ?? 0);
+        const ca2 = Number(row.ca2 ?? row.test2 ?? 0);
+        const proj = Number(row.project ?? row.proj ?? 0);
+        const exam = Number(row.exam ?? 0);
+        const totalScore = Number(row.totalScore) || (ca1 + ca2 + proj + exam);
+
         return {
-          ...row,
           studentId: matchedStudent ? matchedStudent._id : row.studentId,
-          admissionNo: matchedStudent ? matchedStudent.admissionNo : row.admissionNo
+          admissionNo: matchedStudent ? matchedStudent.admissionNo : row.admissionNo,
+          name: row.name || row.studentName || (matchedStudent ? matchedStudent.name : 'Student'),
+          ca1,
+          ca2,
+          project: proj,
+          exam,
+          totalScore,
+          broughtForward: Number(row.broughtForward ?? row.cumBF ?? 0),
+          averageScore: Number(row.averageScore ?? totalScore),
+          grade: row.grade || 'F',
+          remark: row.remark || 'SATISFACTORY'
         };
       })
       .filter(Boolean);
 
+    // UPSERT: Prevents E11000 duplicate key error by updating if record exists
+    const gridQuery = { 
+      className: classRegex, 
+      subjectName: new RegExp(`^${targetSubject.replace(/\s+/g, '\\s*')}$`, 'i'), 
+      term: targetTerm, 
+      session: targetSession 
+    };
+
+    if (targetCampus !== 'All Campuses') {
+      gridQuery.campus = targetCampus;
+    }
+
     const updatedGrid = await GradingGrid.findOneAndUpdate(
-      { 
-        className: classRegex, 
-        subjectName: new RegExp(`^${subjectName.trim().replace(/\s+/g, '\\s*')}$`, 'i'), 
-        term: term.trim(), 
-        session: session.trim(),
-        campus: targetCampus // 👈 Isolated update by campus
-      },
+      gridQuery,
       {
         $set: {
-          className: cleanClass,
+          className: targetClass,
           schoolSection,
-          subjectName: subjectName.trim(),
-          term: term.trim(),
-          session: session.trim(),
+          subjectName: targetSubject,
+          term: targetTerm,
+          session: targetSession,
           campus: targetCampus,
           studentsScores: sanitizedScores,
           status: 'Draft',
           updatedAt: new Date()
         }
       },
-      { new: true, upsert: true }
+      { new: true, upsert: true, runValidators: true }
     );
 
     return res.status(200).json({
       success: true,
       message: "Grading matrix draft saved successfully.",
-      data: updatedGrid
+      data: updatedGrid,
+      grid: updatedGrid
     });
 
   } catch (error) {
@@ -448,7 +482,7 @@ export const getMyResults = async (req, res) => {
         const studentCampus = (student.campus || 'Emerald Campus').trim();
         const structCampus = (struct.campus || 'Emerald Campus').trim();
 
-        // 🔒 Fee Match by Class & Campus
+        // Fee Match by Class & Campus
         if ((structClass === studentClass || structClass.replace(/\s+/g, '') === studentClass.replace(/\s+/g, '')) && structCampus === studentCampus) {
           struct.items?.forEach(item => {
             if (item.checked !== false) {

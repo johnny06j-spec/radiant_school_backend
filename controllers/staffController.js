@@ -38,6 +38,103 @@ const calculateGrade = (score, section = 'PRIMARY') => {
 };
 
 /**
+ * @route   POST /api/teachers/save-grid
+ * @desc    Persist or update draft scores for a specific subject grading grid (Upsert Logic)
+ */
+export const saveGrid = async (req, res) => {
+  try {
+    const { 
+      className, subject, subjectName, term, session, 
+      campus = 'Emerald Campus', records, studentsScores, schoolSection 
+    } = req.body;
+
+    const targetSubject = (subject || subjectName || '').trim();
+    const targetClass = (className || '').trim();
+    const targetTerm = (term || '').trim();
+    const targetSession = (session || '').trim();
+    const cleanCampus = typeof campus === 'string' && campus.trim() ? campus.trim() : 'Emerald Campus';
+
+    if (!targetClass || !targetSubject || !targetTerm || !targetSession) {
+      return res.status(400).json({
+        success: false,
+        message: 'Missing required parameters: className, subject, term, or session.'
+      });
+    }
+
+    const rawRecords = Array.isArray(records) ? records : (Array.isArray(studentsScores) ? studentsScores : []);
+
+    const formattedRecords = rawRecords.map(r => {
+      const ca1 = Number(r.ca1 ?? r.test1 ?? 0);
+      const ca2 = Number(r.ca2 ?? r.test2 ?? 0);
+      const proj = Number(r.project ?? r.proj ?? 0);
+      const exam = Number(r.exam ?? 0);
+      const totalScore = Number(r.totalScore) || (ca1 + ca2 + proj + exam);
+
+      return {
+        studentId: r.studentId || r._id,
+        admissionNo: r.admissionNo || '',
+        studentName: r.name || r.studentName || '',
+        ca1,
+        ca2,
+        project: proj,
+        exam,
+        totalScore,
+        broughtForward: Number(r.broughtForward ?? r.cumBF ?? 0),
+        averageScore: Number(r.averageScore ?? totalScore),
+        grade: r.grade || calculateGrade(totalScore, schoolSection || 'PRIMARY'),
+        remark: r.remark || 'SATISFACTORY'
+      };
+    });
+
+    // 🟢 UPSERT QUERY: Modifies existing record or inserts if non-existent without throwing E11000 duplicate key error
+    const gridQuery = {
+      className: targetClass,
+      subjectName: targetSubject,
+      term: targetTerm,
+      session: targetSession
+    };
+
+    if (cleanCampus !== 'All Campuses') {
+      gridQuery.campus = cleanCampus;
+    }
+
+    const savedGrid = await GradingGrid.findOneAndUpdate(
+      gridQuery,
+      {
+        $set: {
+          className: targetClass,
+          subjectName: targetSubject,
+          term: targetTerm,
+          session: targetSession,
+          campus: cleanCampus,
+          studentsScores: formattedRecords,
+          updatedAt: new Date()
+        }
+      },
+      {
+        new: true,
+        upsert: true, // 👈 Performs create or update safely
+        runValidators: true
+      }
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: 'Draft scores saved successfully into database grid.',
+      grid: savedGrid
+    });
+
+  } catch (error) {
+    console.error('💥 Error persisting draft score grid:', error);
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to persist draft scores into database.',
+      error: error.message
+    });
+  }
+};
+
+/**
  * @route   POST /api/teachers/register (or /api/teachers)
  * @desc    Provision new instructor / HM / Principal profile with explicit campus assignment
  */
@@ -54,7 +151,6 @@ export const registerStaff = async (req, res) => {
     const targetFirstName = firstName ? firstName.trim() : '';
     const fullName = name ? name.trim() : `${targetSurname} ${targetFirstName}`.trim();
 
-    // 🔴 Multi-Campus Normalization
     const rawCampus = typeof campus === 'string' ? campus : String(campus || 'Emerald Campus');
     const cleanCampus = ['Emerald Campus', 'Great Campus'].includes(rawCampus.trim()) ? rawCampus.trim() : 'Emerald Campus';
 
@@ -109,7 +205,7 @@ export const registerStaff = async (req, res) => {
       username: finalUsername,
       password: hashedPassword,
       role: assignedRole,
-      campus: cleanCampus, // 👈 Persist Campus
+      campus: cleanCampus,
       phone: phone ? phone.trim() : '',
       schoolSection: activeSection,
       department: isExec ? 'Executive Administration' : (department || 'General'),
@@ -404,7 +500,6 @@ export const getSingleStudentReview = async (req, res) => {
       GradingGrid.find(gridFilter).lean()
     ]);
 
-    // 🟢 Robust Previous Term B.F Scores Lookup
     let prevScoresMap = {};
     const normalizedTerm = term.trim().toUpperCase();
 
