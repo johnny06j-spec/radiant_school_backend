@@ -318,18 +318,19 @@ export const saveGradingGridDraft = async (req, res) => {
       })
       .filter(Boolean);
 
-    // 🟢 Step A: Find existing grid by class, subject, term, session (bypasses index conflict)
+    // 🟢 Step A: Query specifically for THIS campus's grid
     let existingGrid = await GradingGrid.findOne({
       className: classRegex,
       subjectName: subjectRegex,
       term: targetTerm,
-      session: targetSession
+      session: targetSession,
+      campus: targetCampus // 🔒 Strictly isolated by campus
     });
 
     let updatedGrid;
 
     if (existingGrid) {
-      // 🟢 Step B: Update document instance directly by _id to avoid E11000 insert collision
+      // 🟢 Step B: Update document instance for THIS campus
       existingGrid.className = targetClass;
       existingGrid.schoolSection = schoolSection || existingGrid.schoolSection;
       existingGrid.subjectName = targetSubject;
@@ -342,7 +343,7 @@ export const saveGradingGridDraft = async (req, res) => {
 
       updatedGrid = await existingGrid.save();
     } else {
-      // 🟢 Step C: Create new grid if it doesn't exist yet
+      // 🟢 Step C: Create a NEW distinct grid document for this campus
       updatedGrid = await GradingGrid.create({
         className: targetClass,
         schoolSection,
