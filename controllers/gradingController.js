@@ -235,7 +235,7 @@ export const fetchGradingGrid = async (req, res) => {
 
 /**
  * @route   POST /api/teachers/save-grid
- * @desc    Save grading grid draft safely with campus binding (Upsert Logic)
+ * @desc    Save grading grid draft safely with campus binding (Bypasses Duplicate Key E11000)
  * @access  Private (Teacher/Staff)
  */
 export const saveGradingGridDraft = async (req, res) => {
@@ -265,6 +265,7 @@ export const saveGradingGridDraft = async (req, res) => {
 
     const classPattern = targetClass.replace(/\s+/g, '\\s*');
     const classRegex = new RegExp(`^${classPattern}$`, 'i');
+    const subjectRegex = new RegExp(`^${targetSubject.replace(/\s+/g, '\\s*')}$`, 'i');
 
     const realStudents = await Student.find({
       $or: [
@@ -317,35 +318,42 @@ export const saveGradingGridDraft = async (req, res) => {
       })
       .filter(Boolean);
 
-    // UPSERT: Prevents E11000 duplicate key error by updating if record exists
-    const gridQuery = { 
-      className: classRegex, 
-      subjectName: new RegExp(`^${targetSubject.replace(/\s+/g, '\\s*')}$`, 'i'), 
-      term: targetTerm, 
-      session: targetSession 
-    };
+    // 🟢 Step A: Find existing grid by class, subject, term, session (bypasses index conflict)
+    let existingGrid = await GradingGrid.findOne({
+      className: classRegex,
+      subjectName: subjectRegex,
+      term: targetTerm,
+      session: targetSession
+    });
 
-    if (targetCampus !== 'All Campuses') {
-      gridQuery.campus = targetCampus;
+    let updatedGrid;
+
+    if (existingGrid) {
+      // 🟢 Step B: Update document instance directly by _id to avoid E11000 insert collision
+      existingGrid.className = targetClass;
+      existingGrid.schoolSection = schoolSection || existingGrid.schoolSection;
+      existingGrid.subjectName = targetSubject;
+      existingGrid.term = targetTerm;
+      existingGrid.session = targetSession;
+      existingGrid.campus = targetCampus;
+      existingGrid.studentsScores = sanitizedScores;
+      existingGrid.status = 'Draft';
+      existingGrid.updatedAt = new Date();
+
+      updatedGrid = await existingGrid.save();
+    } else {
+      // 🟢 Step C: Create new grid if it doesn't exist yet
+      updatedGrid = await GradingGrid.create({
+        className: targetClass,
+        schoolSection,
+        subjectName: targetSubject,
+        term: targetTerm,
+        session: targetSession,
+        campus: targetCampus,
+        studentsScores: sanitizedScores,
+        status: 'Draft'
+      });
     }
-
-    const updatedGrid = await GradingGrid.findOneAndUpdate(
-      gridQuery,
-      {
-        $set: {
-          className: targetClass,
-          schoolSection,
-          subjectName: targetSubject,
-          term: targetTerm,
-          session: targetSession,
-          campus: targetCampus,
-          studentsScores: sanitizedScores,
-          status: 'Draft',
-          updatedAt: new Date()
-        }
-      },
-      { new: true, upsert: true, runValidators: true }
-    );
 
     return res.status(200).json({
       success: true,
