@@ -1,0 +1,518 @@
+// controllers/financeController.js
+import FeeStructure from '../models/FeeStructure.js';
+import Student from '../models/Student.js';
+import Payment from '../models/Payment.js';
+import SystemConfig from '../models/SystemConfig.js';
+
+// Helper function to normalize class names
+const normalizeClassName = (name) => {
+  if (!name) return '';
+  return name
+    .trim()
+    .toUpperCase()
+    .replace(/\bKG\s*I\b/g, 'KG 1')
+    .replace(/\bKG\s*II\b/g, 'KG 2')
+    .replace(/\bKG\s*III\b/g, 'KG 3')
+    .replace(/\bJSS\s*I\b/g, 'JSS 1')
+    .replace(/\bJSS\s*II\b/g, 'JSS 2')
+    .replace(/\bJSS\s*III\b/g, 'JSS 3')
+    .replace(/\bSSS\s*I\b/g, 'SSS 1')
+    .replace(/\bSSS\s*II\b/g, 'SSS 2')
+    .replace(/\bSSS\s*III\b/g, 'SSS 3');
+};
+
+// Simple, reliable chronological term checker
+const isOlderTerm = (compSession, compTerm, targetSession, targetTerm) => {
+  if (compSession === targetSession && compTerm === targetTerm) return false;
+  
+  const getStartYear = (s) => parseInt(s.split('/')[0]) || 0;
+  const compYear = getStartYear(compSession);
+  const targetYear = getStartYear(targetSession);
+
+  if (compYear !== targetYear) {
+    return compYear < targetYear;
+  }
+
+  const termWeights = { 'First Term': 1, 'Second Term': 2, 'Third Term': 3 };
+  return (termWeights[compTerm] || 0) < (termWeights[targetTerm] || 0);
+};
+
+// =========================================================================
+// PHASE 2: ADMIN CONFIGURATION ENGINE (SET CLASS FEES)
+// =========================================================================
+
+export const saveFeeStructure = async (req, res) => {
+  try {
+    const { className, term, session, items } = req.body;
+
+    if (!className || !term || !session || !Array.isArray(items)) {
+      return res.status(400).json({ success: false, message: "Missing required parameters." });
+    }
+
+    const totalAmount = items
+      .filter(item => item.checked !== false)
+      .reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+
+    const structure = await FeeStructure.findOneAndUpdate(
+      { className, term, session },
+      { items, totalAmount, status: 'Active' },
+      { new: true, upsert: true, runValidators: true }
+    );
+
+    res.status(200).json({ success: true, data: structure });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const getFeeStructures = async (req, res) => {
+  try {
+    const structures = await FeeStructure.find().sort({ createdAt: -1 });
+    res.status(200).json({ success: true, data: structures });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const toggleStructureStatus = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    const updatedStructure = await FeeStructure.findByIdAndUpdate(
+      id,
+      { status },
+      { new: true, runValidators: true }
+    );
+
+    res.status(200).json({ success: true, data: updatedStructure });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const deleteFeeStructure = async (req, res) => {
+  try {
+    const { id } = req.params;
+    await FeeStructure.findByIdAndDelete(id);
+    res.status(200).json({ success: true, message: "Fee configuration dropped." });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// =========================================================================
+// PHASE 3: CLIENT PORTAL & SELF-SERVICE LIVE LEDGER CALCULATIONS
+// =========================================================================
+
+export const getStudentLedger = async (req, res) => {
+  try {
+    const { studentId } = req.params;
+    const { term, session } = req.query; 
+
+    if (!term || !session) {
+      return res.status(400).json({ success: false, message: "Missing term or session." });
+    }
+
+    const student = await Student.findById(studentId);
+    if (!student) {
+      return res.status(404).json({ success: false, message: "Student not found." });
+    }
+
+    const studentNormalizedClass = normalizeClassName(student.currentClass);
+    const currentStructure = await FeeStructure.findOne({ 
+      className: student.currentClass, 
+      term, 
+      session 
+    });
+
+    const isStructureActive = currentStructure?.status === 'Active' || currentStructure?.status === 'active';
+
+    let currentExpected = 0;
+    let currentPersonalizedItems = [];
+    let currentStudentType = (student.admittedSession || student.admissionSession) === session ? 'New Students' : 'Returning Students';
+
+    if (currentStructure) {
+      currentPersonalizedItems = currentStructure.items.filter(item => 
+        item.checked !== false && (item.appliesTo === 'All Students' || item.appliesTo === currentStudentType)
+      );
+      currentExpected = currentPersonalizedItems.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
+    }
+
+    const allSuccessfulPayments = await Payment.find({ studentId, status: 'Successful' });
+    const aggregatePaid = allSuccessfulPayments.reduce((sum, log) => sum + log.amountPaid, 0);
+
+    let basePreviousOutstanding = Number(student.previousOutstanding) || 0;
+    let workingCredit = aggregatePaid;
+
+    let computedPrevious = Math.max(0, basePreviousOutstanding - workingCredit);
+    workingCredit = Math.max(0, workingCredit - basePreviousOutstanding);
+
+    let computedCurrentOutstanding = Math.max(0, currentExpected - workingCredit);
+
+    let finalPrevious = computedPrevious;
+    let finalCurrentExpected = currentExpected;
+    let finalCurrentOutstanding = computedCurrentOutstanding;
+
+    if (!isStructureActive) {
+      finalPrevious += computedCurrentOutstanding;
+      finalCurrentExpected = 0;
+      finalCurrentOutstanding = 0;
+    }
+
+    res.status(200).json({
+      success: true,
+      data: {
+        student,
+        studentType: currentStudentType,
+        items: isStructureActive ? currentPersonalizedItems : [],
+        paymentHistory: allSuccessfulPayments.filter(p => p.term === term && p.session === session),
+        currentTermFee: finalCurrentExpected,
+        totalPaid: aggregatePaid,
+        previousOutstanding: finalPrevious,
+        totalOutstanding: finalCurrentOutstanding + finalPrevious
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const processCashlessPayment = async (req, res) => {
+  try {
+    const { studentId, amountPaid, term, session, reference } = req.body;
+
+    const invoiceReceipt = await Payment.create({
+      studentId,
+      amountPaid: Number(amountPaid),
+      term,
+      session,
+      reference,
+      paymentMethod: 'Online Gateway Channel',
+      status: 'Successful'
+    });
+
+    res.status(201).json({ success: true, data: invoiceReceipt });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+// =========================================================================
+// PHASE 4: GLOBAL FINANCE OVERVIEW ENGINE & DEBTORS AGGREGATOR
+// =========================================================================
+
+export const getGlobalFinanceSummary = async (req, res) => {
+  try {
+    const { session, term } = req.query; // 🟢 FIX 1: Support dynamic filtering in dashboard metrics
+    
+    const systemSettings = await SystemConfig.findOne({});
+    const targetSession = session || systemSettings?.currentSession || "2026/2027";
+    const targetTerm = term || systemSettings?.currentTerm || "First Term";
+
+    const activeStructures = await FeeStructure.find({ session: targetSession, term: targetTerm, status: 'Active' });
+    const students = await Student.find({ status: { $in: ['Active', 'active', null] } });
+
+    let expected = 0;
+
+    students.forEach(student => {
+      const studentClass = normalizeClassName(student.currentClass);
+      const matchingStructure = activeStructures.find(struct => 
+        normalizeClassName(struct.className) === studentClass
+      );
+
+      if (matchingStructure?.items) {
+        const studentSessionStr = (student.admittedSession || student.admissionSession || '').trim();
+        const isNewIntake = studentSessionStr === targetSession;
+        const studentType = isNewIntake ? 'New Students' : 'Returning Students';
+
+        matchingStructure.items.forEach(item => {
+          if (item.checked !== false && (item.appliesTo === 'All Students' || item.appliesTo === studentType)) {
+            expected += Number(item.amount) || 0;
+          }
+        });
+      }
+    });
+
+    const payments = await Payment.find({ session: targetSession, term: targetTerm, status: 'Successful' }).lean();
+    const collected = payments.reduce((sum, p) => sum + (p.amountPaid || 0), 0);
+
+    res.status(200).json({
+      success: true,
+      data: {
+        grossExpectedRevenue: expected,
+        totalNetCollected: collected,
+        totalSystemArrears: Math.max(expected - collected, 0)
+      }
+    });
+  } catch (error) {
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
+export const getDebtorsList = async (req, res) => {
+  try {
+    const { search, assignedClass, session, term } = req.query;
+
+    const systemSettings = await SystemConfig.findOne({});
+    const targetSession = session || systemSettings?.currentSession || "2026/2027";
+    const targetTerm = term || systemSettings?.currentTerm || "First Term";
+
+    let studentQuery = { 
+      $or: [
+        { status: { $in: ['Active', 'active', null] } },
+        { status: { $exists: false } }
+      ]
+    };
+
+    if (assignedClass && assignedClass !== 'All Classes' && assignedClass !== 'All') {
+      studentQuery.$or = [{ currentClass: assignedClass }, { assignedClass: assignedClass }];
+    }
+
+    if (search && search.trim() !== '') {
+      const searchRegex = new RegExp(search.trim(), 'i');
+      studentQuery.$and = [
+        {
+          $or: [
+            { surname: searchRegex },
+            { lastName: searchRegex },
+            { firstName: searchRegex },
+            { otherName: searchRegex },
+            { name: searchRegex },
+            { studentName: searchRegex },
+            { admissionNo: searchRegex }
+          ]
+        }
+      ];
+    }
+
+    const students = await Student.find(studentQuery).lean();
+    const allStructures = await FeeStructure.find({}).lean();
+    const currentTermStructures = allStructures.filter(f => f.session === targetSession && f.term === targetTerm);
+
+    let debtors = [];
+    let summaryTotalPrevious = 0;
+    let summaryTotalCurrent = 0;
+    let summaryTotalAll = 0;
+    let uniqueClassesWithDebtors = new Set();
+
+    for (const student of students) {
+      const currentClass = student.currentClass || student.assignedClass || "JSS 1";
+      const normalizedClass = normalizeClassName(currentClass);
+      
+      let pastExpectations = 0;
+      allStructures.forEach(struct => {
+        if (normalizeClassName(struct.className) === normalizedClass && isOlderTerm(struct.session, struct.term, targetSession, targetTerm)) {
+          const admittedSession = student.admittedSession || student.admissionSession || struct.session;
+          const studentType = admittedSession === struct.session ? 'New Students' : 'Returning Students';
+          
+          struct.items.forEach(item => {
+            if (item.checked !== false && (item.appliesTo === 'All Students' || item.appliesTo === studentType)) {
+              pastExpectations += Number(item.amount) || 0;
+            }
+          });
+        }
+      });
+
+      const matchingCurrentStructure = currentTermStructures.find(f => normalizeClassName(f.className) === normalizedClass);
+      const isStructureActive = matchingCurrentStructure?.status === 'Active' || matchingCurrentStructure?.status === 'active';
+
+      let currentTermExpectedFee = 0;
+      if (matchingCurrentStructure?.items) {
+        const admittedSession = student.admittedSession || student.admissionSession || targetSession;
+        const studentType = admittedSession === targetSession ? 'New Students' : 'Returning Students';
+        
+        matchingCurrentStructure.items.forEach(item => {
+          if (item.checked !== false && (item.appliesTo === 'All Students' || item.appliesTo === studentType)) {
+            currentTermExpectedFee += Number(item.amount) || 0;
+          }
+        });
+      }
+
+      const payments = await Payment.find({ studentId: student._id, status: 'Successful' }).lean();
+      const grandTotalPaid = payments.reduce((sum, p) => sum + (Number(p.amountPaid) || 0), 0);
+      const basePreviousOutstanding = Number(student.previousOutstanding) || 0;
+
+      let totalDebtToResolve = basePreviousOutstanding + pastExpectations;
+      let remainingPaymentCredit = grandTotalPaid;
+
+      let computedPrevious = Math.max(0, totalDebtToResolve - remainingPaymentCredit);
+      remainingPaymentCredit = Math.max(0, remainingPaymentCredit - totalDebtToResolve);
+
+      let computedCurrentTermOutstanding = Math.max(0, currentTermExpectedFee - remainingPaymentCredit);
+
+      let computedCurrent = 0;
+      let computedPreviousWithTerm = computedPrevious;
+
+      if (isStructureActive) {
+        computedCurrent = computedCurrentTermOutstanding;
+      } else {
+        computedPreviousWithTerm += computedCurrentTermOutstanding;
+      }
+
+      let studentTotalOutstanding = computedPreviousWithTerm + computedCurrent;
+
+      if (studentTotalOutstanding > 0) {
+        let computedName = `${student.firstName || ''} ${student.surname || student.lastName || ''}`.trim();
+        if (!computedName || computedName.length < 2) {
+          computedName = student.studentName || student.admissionNo || "Active Student";
+        }
+
+        debtors.push({
+          _id: student._id,
+          studentName: computedName,
+          admissionNo: student.admissionNo || "N/A",
+          class: currentClass,
+          previousOutstanding: computedPreviousWithTerm,
+          currentOutstanding: computedCurrent,
+          totalOutstanding: studentTotalOutstanding
+        });
+
+        summaryTotalPrevious += computedPreviousWithTerm;
+        summaryTotalCurrent += computedCurrent;
+        summaryTotalAll += studentTotalOutstanding;
+        uniqueClassesWithDebtors.add(currentClass);
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      metrics: {
+        totalDebtorsCount: debtors.length,
+        totalPreviousOutstanding: summaryTotalPrevious,
+        totalCurrentOutstanding: summaryTotalCurrent,
+        totalOutstandingAll: summaryTotalAll,
+        classesWithDebtorsCount: uniqueClassesWithDebtors.size
+      },
+      debtors
+    });
+  } catch (error) {
+    console.error("💥 Debtors List Aggregation Error:", error);
+    return res.status(500).json({ success: false, message: "Error compiling debtors summary records." });
+  }
+};
+
+export const getDebtorsPdfData = async (req, res) => {
+  try {
+    const { session, term } = req.query;
+
+    const systemSettings = await SystemConfig.findOne({});
+    const targetSession = session || systemSettings?.currentSession || "2026/2027";
+    const targetTerm = term || systemSettings?.currentTerm || "First Term";
+
+    const students = await Student.find({ status: { $in: ['Active', 'active', null] } }).lean();
+    const allStructures = await FeeStructure.find({}).lean();
+    const currentTermStructures = allStructures.filter(f => f.session === targetSession && f.term === targetTerm);
+
+    let grandTotalPrevious = 0;
+    let grandTotalCurrent = 0;
+    let grandTotalSchool = 0;
+    
+    let classGroups = {};
+
+    for (const student of students) {
+      const currentClass = student.currentClass || student.assignedClass || "JSS 1";
+      const normalizedClass = normalizeClassName(currentClass);
+
+      let pastExpectations = 0;
+      allStructures.forEach(struct => {
+        if (normalizeClassName(struct.className) === normalizedClass && isOlderTerm(struct.session, struct.term, targetSession, targetTerm)) {
+          const admittedSession = student.admittedSession || student.admissionSession || struct.session;
+          const studentType = admittedSession === struct.session ? 'New Students' : 'Returning Students';
+          
+          struct.items.forEach(item => {
+            if (item.checked !== false && (item.appliesTo === 'All Students' || item.appliesTo === studentType)) {
+              pastExpectations += Number(item.amount) || 0;
+            }
+          });
+        }
+      });
+
+      const matchingCurrentStructure = currentTermStructures.find(f => normalizeClassName(f.className) === normalizedClass);
+      const isStructureActive = matchingCurrentStructure?.status === 'Active' || matchingCurrentStructure?.status === 'active';
+
+      let currentTermExpectedFee = 0;
+      if (matchingCurrentStructure?.items) {
+        const admittedSession = student.admittedSession || student.admissionSession || targetSession;
+        const studentType = admittedSession === targetSession ? 'New Students' : 'Returning Students';
+        
+        matchingCurrentStructure.items.forEach(item => {
+          if (item.checked !== false && (item.appliesTo === 'All Students' || item.appliesTo === studentType)) {
+            currentTermExpectedFee += Number(item.amount) || 0;
+          }
+        });
+      }
+
+      const payments = await Payment.find({ studentId: student._id, status: 'Successful' }).lean();
+      const grandTotalPaid = payments.reduce((sum, p) => sum + (Number(p.amountPaid) || 0), 0);
+      const basePreviousOutstanding = Number(student.previousOutstanding) || 0;
+
+      let totalDebtToResolve = basePreviousOutstanding + pastExpectations;
+      let remainingPaymentCredit = grandTotalPaid;
+
+      let computedPrevious = Math.max(0, totalDebtToResolve - remainingPaymentCredit);
+      remainingPaymentCredit = Math.max(0, remainingPaymentCredit - totalDebtToResolve);
+
+      let computedCurrentTermOutstanding = Math.max(0, currentTermExpectedFee - remainingPaymentCredit);
+
+      let computedCurrent = 0;
+      let computedPreviousWithTerm = computedPrevious;
+
+      if (isStructureActive) {
+        computedCurrent = computedCurrentTermOutstanding;
+      } else {
+        computedPreviousWithTerm += computedCurrentTermOutstanding;
+      }
+
+      let studentTotalOutstanding = computedPreviousWithTerm + computedCurrent;
+
+      if (studentTotalOutstanding > 0) {
+        let computedName = `${student.firstName || ''} ${student.surname || student.lastName || ''}`.trim();
+        if (!computedName || computedName.length < 2) {
+          computedName = student.studentName || student.admissionNo || "Active Student";
+        }
+
+        if (!classGroups[currentClass]) {
+          classGroups[currentClass] = {
+            className: currentClass,
+            students: [],
+            subtotalPrevious: 0,
+            subtotalCurrent: 0,
+            subtotalTotal: 0
+          };
+        }
+
+        classGroups[currentClass].students.push({
+          studentName: computedName,
+          admissionNo: student.admissionNo || "N/A",
+          previousOutstanding: computedPreviousWithTerm,
+          currentOutstanding: computedCurrent,
+          totalOutstanding: studentTotalOutstanding
+        });
+
+        classGroups[currentClass].subtotalPrevious += computedPreviousWithTerm;
+        classGroups[currentClass].subtotalCurrent += computedCurrent;
+        classGroups[currentClass].subtotalTotal += studentTotalOutstanding;
+
+        grandTotalPrevious += computedPreviousWithTerm;
+        grandTotalCurrent += computedCurrent;
+        grandTotalSchool += studentTotalOutstanding;
+      }
+    }
+
+    return res.status(200).json({
+      success: true,
+      academicSession: targetSession,
+      academicTerm: targetTerm,
+      generatedAtDate: new Date().toLocaleDateString('en-GB'),
+      grandTotals: {
+        grandTotalPrevious,
+        grandTotalCurrent,
+        grandTotalSchool
+      },
+      reportData: Object.values(classGroups)
+    });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: "Error compiling report records." });
+  }
+};
