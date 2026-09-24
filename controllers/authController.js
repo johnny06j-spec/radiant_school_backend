@@ -4,10 +4,12 @@ import Student from '../models/Student.js';
 import RefreshToken from '../models/RefreshToken.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
-import { authenticator } from 'otplib';
+import pkg from 'otplib';
 import qrcode from 'qrcode';
 import { generateAccessToken, generateAndStoreRefreshToken } from '../utils/tokenService.js';
 import { sendSecurityAlertEmail } from '../utils/emailService.js';
+
+const { authenticator } = pkg;
 
 // Cookie Configuration for Cross-Origin Production Setup (Vercel Frontend + Render Backend)
 const COOKIE_OPTIONS = {
