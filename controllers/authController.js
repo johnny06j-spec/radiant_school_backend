@@ -1,9 +1,18 @@
 // controllers/authController.js
 import User from '../models/User.js';
 import Student from '../models/Student.js'; 
+import RefreshToken from '../models/RefreshToken.js';
 import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
+import { generateAccessToken, generateAndStoreRefreshToken } from '../utils/tokenService.js';
+
+// Cookie Configuration for Cross-Origin Production Setup (Vercel Frontend + Render Backend)
+const COOKIE_OPTIONS = {
+  httpOnly: true,
+  secure: true, // Always true in HTTPS / Production
+  sameSite: 'None', // Required for cross-domain Vercel <-> Render cookie sharing
+  path: '/'
+};
 
 /**
  * Helper to extract the 2-digit starting year prefix from a session string (e.g., "2027/2028" -> "27")
@@ -16,7 +25,7 @@ const getSessionYearPrefix = (sessionStr) => {
 
 /**
  * @route   POST /api/auth/login
- * @desc    Authenticate administrative, staff, and student personnel
+ * @desc    Authenticate administrative, staff, and student personnel using secure httpOnly cookies
  * @access  Public
  */
 export const loginUser = async (req, res) => {
@@ -46,6 +55,13 @@ export const loginUser = async (req, res) => {
       });
     }
 
+    if (user.isActive === false) {
+      return res.status(401).json({
+        success: false,
+        message: "Account is deactivated. Contact system administrator."
+      });
+    }
+
     let isMatch = false;
     try {
       isMatch = await bcrypt.compare(password, user.password);
@@ -64,22 +80,17 @@ export const loginUser = async (req, res) => {
       });
     }
 
-    const token = jwt.sign(
-      { 
-        id: user._id, 
-        role: user.role,
-        campus: user.campus || 'Emerald Campus',
-        isClassTeacher: user.isClassTeacher || false,
-        classTeacherOf: user.classTeacherOf || ''
-      },
-      process.env.JWT_SECRET || 'fallbackSecretKey',
-      { expiresIn: '1d' }
-    );
+    // Generate short-lived access token and 7-day refresh token
+    const accessToken = generateAccessToken(user._id);
+    const refreshToken = await generateAndStoreRefreshToken(user._id);
+
+    // Attach httpOnly cookies to response
+    res.cookie('accessToken', accessToken, { ...COOKIE_OPTIONS, maxAge: 15 * 60 * 1000 }); // 15 mins
+    res.cookie('refreshToken', refreshToken, { ...COOKIE_OPTIONS, maxAge: 7 * 24 * 60 * 60 * 1000 }); // 7 days
 
     return res.status(200).json({
       success: true,
       message: `Welcome back, ${user.name || 'User'}`,
-      token,
       user: {
         id: user._id,
         name: user.name || '',
@@ -103,9 +114,73 @@ export const loginUser = async (req, res) => {
     console.error("💥 Auth Pipeline Exception:", error);
     return res.status(500).json({ 
       success: false, 
-      message: "Server error during authentication.",
-      error: error.message 
+      message: "Server error during authentication."
     });
+  }
+};
+
+/**
+ * @route   POST /api/auth/refresh
+ * @desc    Rotate and re-issue short-lived access tokens using hashed refresh token check
+ * @access  Public (Cookie Based)
+ */
+export const refreshTokenSession = async (req, res) => {
+  try {
+    const rawRefreshToken = req.cookies?.refreshToken;
+    if (!rawRefreshToken) {
+      return res.status(401).json({ success: false, message: "No refresh token provided." });
+    }
+
+    const tokenHash = crypto.createHash('sha256').update(rawRefreshToken).digest('hex');
+    const storedToken = await RefreshToken.findOne({ tokenHash, revoked: false });
+
+    if (!storedToken || new Date() > storedToken.expiresAt) {
+      return res.status(401).json({ success: false, message: "Refresh token expired or revoked." });
+    }
+
+    const user = await User.findById(storedToken.userId);
+    if (!user || user.isActive === false) {
+      return res.status(401).json({ success: false, message: "User account inactive or missing." });
+    }
+
+    // Revoke used token (Token Rotation)
+    storedToken.revoked = true;
+    await storedToken.save();
+
+    // Issue new pair
+    const newAccessToken = generateAccessToken(user._id);
+    const newRefreshToken = await generateAndStoreRefreshToken(user._id);
+
+    res.cookie('accessToken', newAccessToken, { ...COOKIE_OPTIONS, maxAge: 15 * 60 * 1000 });
+    res.cookie('refreshToken', newRefreshToken, { ...COOKIE_OPTIONS, maxAge: 7 * 24 * 60 * 60 * 1000 });
+
+    return res.status(200).json({ success: true, message: "Session refreshed successfully." });
+  } catch (error) {
+    console.error("💥 Refresh Token Pipeline Exception:", error);
+    return res.status(500).json({ success: false, message: "Error refreshing session token." });
+  }
+};
+
+/**
+ * @route   POST /api/auth/logout
+ * @desc    Revoke stored refresh token and wipe httpOnly cookies
+ * @access  Public
+ */
+export const logoutUser = async (req, res) => {
+  try {
+    const rawRefreshToken = req.cookies?.refreshToken;
+    if (rawRefreshToken) {
+      const tokenHash = crypto.createHash('sha256').update(rawRefreshToken).digest('hex');
+      await RefreshToken.updateOne({ tokenHash }, { revoked: true });
+    }
+
+    res.clearCookie('accessToken', COOKIE_OPTIONS);
+    res.clearCookie('refreshToken', COOKIE_OPTIONS);
+
+    return res.status(200).json({ success: true, message: "Logged out cleanly." });
+  } catch (error) {
+    console.error("💥 Logout Pipeline Exception:", error);
+    return res.status(500).json({ success: false, message: "Internal server error on logout." });
   }
 };
 
@@ -153,7 +228,6 @@ export const registerStudent = async (req, res) => {
     const safeSurname = String(surname || '').trim();
     const safeOtherName = String(otherName || '').trim();
 
-    // 🟢 SANITIZE CAMPUS: Extract single clean string from string/array/comma-delimited inputs
     let rawCampus = campus;
     if (Array.isArray(rawCampus)) {
       rawCampus = rawCampus[0];
@@ -210,7 +284,7 @@ export const registerStudent = async (req, res) => {
       passportPhotoUrl = req.file.path || req.file.secure_url || req.file.url || "";
     }
 
-    // 1. Create Base User with Target Campus
+    // 1. Create Base User
     createdBaseUser = await User.create({
       name: fullName,
       surname: safeSurname,
@@ -231,7 +305,7 @@ export const registerStudent = async (req, res) => {
       }
     }
 
-    // 3. Create Student Record with Target Campus
+    // 3. Create Student Record
     const newStudent = await Student.create({
       user: createdBaseUser._id, 
       name: fullName,
@@ -297,7 +371,7 @@ export const registerStudent = async (req, res) => {
     console.error("💥 Student enrollment pipeline exception:", error);
     return res.status(500).json({
       success: false,
-      message: error.message || "Internal server error during student entry creation."
+      message: "Internal server error during student entry creation."
     });
   }
 };
@@ -315,17 +389,16 @@ export const getAllStudents = async (req, res) => {
 
     const queryFilters = {};
 
-    // 🏫 Campus Filter
     if (req.query.campus && req.query.campus !== 'All Campuses') {
       queryFilters.campus = req.query.campus;
     }
 
     if (req.query.search && req.query.search.trim() !== '') {
       queryFilters.$or = [
-        { name: { $regex: req.query.search.trim(), $options: "i" } },
-        { surname: { $regex: req.query.search.trim(), $options: "i" } },
-        { firstName: { $regex: req.query.search.trim(), $options: "i" } },
-        { admissionNo: { $regex: req.query.search.trim(), $options: "i" } }
+        { name: { $regex: req.query.search.trim(),$options: "i" } },
+        { surname: { $regex: req.query.search.trim(),$options: "i" } },
+        { firstName: { $regex: req.query.search.trim(),$options: "i" } },
+        { admissionNo: { $regex: req.query.search.trim(),$options: "i" } }
       ];
     }
     
@@ -382,8 +455,7 @@ export const getAllStudents = async (req, res) => {
     console.error("💥 Student collection stream pipeline exception:", error);
     return res.status(500).json({
       success: false,
-      message: "Internal server error streaming active student profiles.",
-      error: error.message
+      message: "Internal server error streaming active student profiles."
     });
   }
 };
@@ -409,15 +481,14 @@ export const getDashboardStats = async (req, res) => {
       stats: {
         totalStudents,
         activeTeachers,
-        databaseLink: "127.0.0.1" 
+        isDbConnected: true
       }
     });
   } catch (error) {
     console.error("💥 Dashboard statistics pipeline exception:", error);
     return res.status(500).json({ 
       success: false, 
-      message: "Internal server error gathering dashboard overview metrics.", 
-      error: error.message 
+      message: "Internal server error gathering dashboard overview metrics."
     });
   }
 };

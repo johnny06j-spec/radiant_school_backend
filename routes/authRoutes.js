@@ -4,6 +4,8 @@ import express from 'express';
 import { uploadPassport } from '../config/cloudinary.js'; 
 import { 
   loginUser, 
+  refreshTokenSession,
+  logoutUser,
   registerStudent, 
   getAllStudents,
   getDashboardStats,
@@ -12,12 +14,20 @@ import {
 
 // 🛡️ JWT authorization gate middleware
 import { verifyToken, isAdmin } from '../middleware/authMiddleware.js';
+// 🛡️ Input Validation & Injection Prevention Middleware
+import { validate, loginBodySchema, campusQuerySchema } from '../middleware/validateMiddleware.js';
 import User from '../models/User.js';
 
 const router = express.Router();
 
-// 🔐 Public login endpoint (Accessible by all roles to establish session)
-router.post('/login', loginUser);
+// 🔐 Public login endpoint with NoSQL injection validation
+router.post('/login', validate(loginBodySchema), loginUser);
+
+// 🔄 Cookie Refresh Token Rotation Endpoint
+router.post('/refresh', refreshTokenSession);
+
+// 🚪 Logout Session & Revoke Token Endpoint
+router.post('/logout', logoutUser);
 
 // 👤 Live Profile Refresh Endpoint (Fetch current MongoDB user state)
 router.get('/me', verifyToken, async (req, res) => {
@@ -26,7 +36,7 @@ router.get('/me', verifyToken, async (req, res) => {
     if (!user) return res.status(404).json({ success: false, message: "User not found." });
     return res.status(200).json({ success: true, user });
   } catch (err) {
-    return res.status(500).json({ success: false, message: err.message });
+    return res.status(500).json({ success: false, message: "Internal server error." });
   }
 });
 
@@ -53,8 +63,8 @@ router.post(
 // 👥 Enrolled Students Directory (Accessible by logged-in Staff & Admin)
 router.get('/students', verifyToken, getAllStudents);
 
-// 📈 Live Dashboard Stats Overview Route (Restricted to logged-in admins)
-router.get('/dashboard-stats', verifyToken, isAdmin, getDashboardStats);
+// 📈 Live Dashboard Stats Overview Route (Restricted to logged-in admins with query validation)
+router.get('/dashboard-stats', verifyToken, isAdmin, validate(campusQuerySchema), getDashboardStats);
 
 // 🔄 Security Credential Upgrade Route (Requires an active user session)
 router.put('/update-password', verifyToken, updatePassword);
