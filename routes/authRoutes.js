@@ -9,7 +9,9 @@ import {
   registerStudent, 
   getAllStudents,
   getDashboardStats,
-  updatePassword 
+  updatePassword,
+  setupTwoFactor,
+  verifyTwoFactor
 } from '../controllers/authController.js';
 
 // 🛡️ JWT authorization gate middleware
@@ -28,6 +30,10 @@ router.post('/refresh', refreshTokenSession);
 
 // 🚪 Logout Session & Revoke Token Endpoint
 router.post('/logout', logoutUser);
+
+// 🔐 Admin Multi-Factor Authentication Endpoints
+router.post('/2fa/setup', verifyToken, isAdmin, setupTwoFactor);
+router.post('/2fa/verify', verifyToken, isAdmin, verifyTwoFactor);
 
 // 👤 Live Profile Refresh Endpoint (Fetch current MongoDB user state)
 router.get('/me', verifyToken, async (req, res) => {

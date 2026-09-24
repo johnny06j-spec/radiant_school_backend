@@ -4,7 +4,10 @@ import Student from '../models/Student.js';
 import RefreshToken from '../models/RefreshToken.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
+import { authenticator } from 'otplib';
+import qrcode from 'qrcode';
 import { generateAccessToken, generateAndStoreRefreshToken } from '../utils/tokenService.js';
+import { sendSecurityAlertEmail } from '../utils/emailService.js';
 
 // Cookie Configuration for Cross-Origin Production Setup (Vercel Frontend + Render Backend)
 const COOKIE_OPTIONS = {
@@ -549,5 +552,78 @@ export const updatePassword = async (req, res) => {
       success: false, 
       message: "Internal server error upgrading credential properties." 
     });
+  }
+};
+
+/**
+ * @route   POST /api/auth/2fa/setup
+ * @desc    Generate TOTP secret and QR code for Admin authenticator app setup
+ * @access  Private (Admin Only)
+ */
+export const setupTwoFactor = async (req, res) => {
+  try {
+    const user = await User.findById(req.user.id);
+    if (!user || user.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Only administrative accounts can configure 2FA.' });
+    }
+
+    const secret = authenticator.generateSecret();
+    const otpauthUrl = authenticator.keyuri(user.email, 'Radiant Intellectuals College', secret);
+    const qrCodeImageUrl = await qrcode.toDataURL(otpauthUrl);
+
+    // Save temporary unverified secret
+    user.twoFactorSecret = secret;
+    await user.save();
+
+    return res.status(200).json({
+      success: true,
+      qrCodeUrl: qrCodeImageUrl,
+      secretKey: secret
+    });
+  } catch (error) {
+    console.error('💥 2FA Setup Pipeline Exception:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error setting up multi-factor auth.' });
+  }
+};
+
+/**
+ * @route   POST /api/auth/2fa/verify
+ * @desc    Verify TOTP token code, activate 2FA, and send emergency alert notification
+ * @access  Private (Admin Only)
+ */
+export const verifyTwoFactor = async (req, res) => {
+  try {
+    const { token } = req.body;
+    if (!token) {
+      return res.status(400).json({ success: false, message: 'Verification code required.' });
+    }
+
+    const user = await User.findById(req.user.id).select('+twoFactorSecret');
+    if (!user || !user.twoFactorSecret) {
+      return res.status(400).json({ success: false, message: 'No 2FA setup requested for this account.' });
+    }
+
+    const isValid = authenticator.check(token, user.twoFactorSecret);
+    if (!isValid) {
+      return res.status(400).json({ success: false, message: 'Invalid authentication code. Ensure time sync on your device.' });
+    }
+
+    user.isTwoFactorEnabled = true;
+    await user.save();
+
+    // Send security notification email to Outlook inbox
+    await sendSecurityAlertEmail(
+      user.email,
+      '🛡️ Security Alert: Multi-Factor Authentication Activated',
+      `Hello ${user.name},\n\nTwo-Factor Authentication (2FA) has been successfully activated on your Radiant Admin account.\n\nIf you did not initiate this change, contact system engineering immediately.`
+    );
+
+    return res.status(200).json({
+      success: true,
+      message: 'Two-Factor Authentication enabled successfully.'
+    });
+  } catch (error) {
+    console.error('💥 2FA Verification Exception:', error);
+    return res.status(500).json({ success: false, message: 'Internal server error verifying multi-factor auth.' });
   }
 };
