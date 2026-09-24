@@ -11,7 +11,6 @@ import { sendSecurityAlertEmail } from '../utils/emailService.js';
 
 const { authenticator } = otplib;
 
-
 // Cookie Configuration for Cross-Origin Production Setup (Vercel Frontend + Render Backend)
 const COOKIE_OPTIONS = {
   httpOnly: true,
@@ -36,7 +35,7 @@ const getSessionYearPrefix = (sessionStr) => {
  */
 export const loginUser = async (req, res) => {
   try {
-    const { usernameOrEmail, password } = req.body;
+    const { usernameOrEmail, password, twoFactorToken } = req.body;
 
     if (!usernameOrEmail || !password) {
       return res.status(400).json({
@@ -86,6 +85,30 @@ export const loginUser = async (req, res) => {
       });
     }
 
+    // 🔐 CHECK IF 2FA IS ENABLED FOR THIS ACCOUNT (ADMIN PROTECTION)
+    if (user.isTwoFactorEnabled) {
+      // If no 2FA token provided yet, prompt the frontend to request 2FA code
+      if (!twoFactorToken) {
+        return res.status(200).json({
+          success: true,
+          requireTwoFactor: true,
+          message: "Two-factor authentication code required.",
+          userId: user._id
+        });
+      }
+
+      // Verify the provided 2FA token against stored secret
+      const userWithSecret = await User.findById(user._id).select('+twoFactorSecret');
+      const isValid2FA = authenticator.check(twoFactorToken, userWithSecret.twoFactorSecret);
+
+      if (!isValid2FA) {
+        return res.status(400).json({
+          success: false,
+          message: "Invalid or expired 2FA verification code."
+        });
+      }
+    }
+
     // Generate short-lived access token and 7-day refresh token
     const accessToken = generateAccessToken(user._id);
     const refreshToken = await generateAndStoreRefreshToken(user._id);
@@ -93,6 +116,15 @@ export const loginUser = async (req, res) => {
     // Attach httpOnly cookies to response
     res.cookie('accessToken', accessToken, { ...COOKIE_OPTIONS, maxAge: 15 * 60 * 1000 }); // 15 mins
     res.cookie('refreshToken', refreshToken, { ...COOKIE_OPTIONS, maxAge: 7 * 24 * 60 * 60 * 1000 }); // 7 days
+
+    // Send Login Security Alert Email for Admin Logins
+    if (user.role === 'admin') {
+      sendSecurityAlertEmail(
+        user.email,
+        '🛡️ Security Alert: New Admin Portal Login',
+        `Hello ${user.name},\n\nA successful login to the Radiant Admin Command Portal was recorded on ${new Date().toLocaleString()}.\n\nIf this was not you, change your password immediately.`
+      );
+    }
 
     return res.status(200).json({
       success: true,
