@@ -25,7 +25,9 @@
     "mongoose": "^9.7.3",
     "multer": "^2.2.0",
     "multer-storage-cloudinary": "^4.0.0",
+    "nodemailer": "^10.0.10",
     "number-to-words": "^1.2.4",
+    "otplib": "^13.5.0",
     "pdfkit": "^0.19.1",
     "qrcode": "^1.5.4",
     "zod": "^4.6.5"

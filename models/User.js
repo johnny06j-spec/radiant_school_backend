@@ -92,7 +92,21 @@ const userSchema = new mongoose.Schema({
   isActive: {
     type: Boolean,
     default: true
-  }
+  },
+
+  // 🔐 2FA & MULTI-FACTOR SECURITY FIELDS
+  twoFactorSecret: { 
+    type: String, 
+    select: false 
+  },
+  isTwoFactorEnabled: { 
+    type: Boolean, 
+    default: false 
+  },
+  twoFactorBackupCodes: [{ 
+    type: String, 
+    select: false 
+  }]
 }, { timestamps: true });
 
 export default mongoose.model('User', userSchema);
