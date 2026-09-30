@@ -255,6 +255,8 @@ export const registerStudent = async (req, res) => {
       genotype,
       religion,
       address,
+      residentialAddress,
+      homeAddress,
       fatherName,
       fatherPhone,
       motherName,
@@ -322,6 +324,10 @@ export const registerStudent = async (req, res) => {
       passportPhotoUrl = req.file.path || req.file.secure_url || req.file.url || "";
     }
 
+    // Robust Address Fallback Resolution
+    const resolvedAddress = (address || residentialAddress || homeAddress || "").trim();
+    const resolvedGuardianAddress = (guardianAddress || resolvedAddress || "").trim();
+
     // 1. Create Base User
     createdBaseUser = await User.create({
       name: fullName,
@@ -370,7 +376,7 @@ export const registerStudent = async (req, res) => {
       bloodGroup: bloodGroup && String(bloodGroup).trim() !== "" ? String(bloodGroup).trim() : undefined,
       genotype: genotype && String(genotype).trim() !== "" ? String(genotype).trim() : undefined,
       religion: religion && String(religion).trim() !== "" ? String(religion).trim() : undefined,
-      address: address && String(address).trim() !== "" ? String(address).trim() : undefined,
+      address: resolvedAddress || undefined,
       password: temporaryPassword, 
       passportPhoto: passportPhotoUrl, 
       role: 'student',
@@ -379,7 +385,7 @@ export const registerStudent = async (req, res) => {
       fatherPhone: fatherPhone ? String(fatherPhone).trim() : "",
       motherName: motherName ? String(motherName).trim() : "",
       motherPhone: motherPhone ? String(motherPhone).trim() : "",
-      guardianAddress: guardianAddress ? String(guardianAddress).trim() : ""
+      guardianAddress: resolvedGuardianAddress || undefined
     });
 
     return res.status(201).json({
