@@ -325,7 +325,7 @@ export const getStudentProfile = async (req, res) => {
     const totalDiscountsWaivers = adjustmentCredits.reduce((sum, adj) => sum + (Number(adj.amount) || 0), 0);
 
     const allStructures = await FeeStructure.find({
-      $or: [{ campus: studentCampus }, { campus: { $exists: false } }]
+      $or: [{ campus: studentCampus }, { campus: {$exists: false } }]
     }).lean();
     allStructures.sort(compareStructuresChronologically);
     
@@ -485,6 +485,8 @@ export const getStudentProfile = async (req, res) => {
         campus: student.campus || 'Emerald Campus',
         dob: student.dob || "N/A", 
         gender: student.gender || "N/A",
+        address: student.address || student.residentialAddress || "N/A",
+        guardianAddress: student.guardianAddress || student.address || "N/A",
         admissionSession: actualAdmissionSession,
         admissionTerm: actualAdmissionTerm,
         academicSession: currentSession, 
@@ -651,6 +653,9 @@ export const updateStudent = async (req, res) => {
       campus,
       admissionTerm,
       admittedTerm,
+      address,
+      residentialAddress,
+      guardianAddress,
       ...restBody
     } = body;
 
@@ -668,6 +673,15 @@ export const updateStudent = async (req, res) => {
     if (gender !== undefined && gender !== null) student.gender = String(gender).trim();
     if (email !== undefined && email !== null) student.email = String(email).toLowerCase().trim();
     
+    // Explicitly handle Address Fields
+    const targetAddress = address || residentialAddress;
+    if (targetAddress !== undefined && targetAddress !== null) {
+      student.address = String(targetAddress).trim();
+    }
+    if (guardianAddress !== undefined && guardianAddress !== null) {
+      student.guardianAddress = String(guardianAddress).trim();
+    }
+
     // Assign single sanitized campus string
     if (sanitizedCampus) {
       student.campus = String(sanitizedCampus).trim();
@@ -688,8 +702,10 @@ export const updateStudent = async (req, res) => {
       student.admittedTerm = activeTerm;
     }
 
-    // 🔴 Delete campus from restBody so Object.assign does not overwrite sanitized campus
+    // 🔴 Delete custom handled keys from restBody so Object.assign does not cause conflicts
     delete restBody.campus;
+    delete restBody.address;
+    delete restBody.residentialAddress;
 
     Object.assign(student, restBody);
 
