@@ -61,12 +61,16 @@ const studentSchema = new mongoose.Schema({
   homeTown: { type: String },
   passportPhoto: { type: String, default: "" },
 
+  // 🏠 RESIDENTIAL & GUARDIAN ADDRESS FIELDS
+  address: { type: String, trim: true, default: "" },
+  residentialAddress: { type: String, trim: true, default: "" },
+  
   // PARENT / GUARDIAN DATA FIELDS
   fatherName: { type: String, default: "" },
   fatherPhone: { type: String, default: "" },
   motherName: { type: String, default: "" },
   motherPhone: { type: String, default: "" },
-  guardianAddress: { type: String, default: "" },
+  guardianAddress: { type: String, trim: true, default: "" },
 
   // FINANCIAL OVERVIEW FIELDS
   previousOutstanding: { type: Number, default: 0 },
@@ -75,7 +79,7 @@ const studentSchema = new mongoose.Schema({
   status: { type: String, default: "Active" }
 }, { timestamps: true });
 
-// 🟢 Pre-save middleware cleanly synchronizes intake aliases
+// 🟢 Pre-save middleware cleanly synchronizes intake aliases and address fields
 studentSchema.pre('save', function (next) {
   if (this.intakeSession) {
     if (!this.admittedSession) this.admittedSession = this.intakeSession;
@@ -85,6 +89,17 @@ studentSchema.pre('save', function (next) {
     if (!this.admittedTerm) this.admittedTerm = this.intakeTerm;
     if (!this.admissionTerm) this.admissionTerm = this.intakeTerm;
   }
+
+  // 🏠 Keep address aliases in sync
+  const primaryAddress = this.address || this.residentialAddress || "";
+  if (primaryAddress) {
+    this.address = primaryAddress;
+    this.residentialAddress = primaryAddress;
+    if (!this.guardianAddress) {
+      this.guardianAddress = primaryAddress;
+    }
+  }
+
   if (typeof next === 'function') next();
 });
 
