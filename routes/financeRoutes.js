@@ -37,7 +37,16 @@ import { generateReceiptPDF } from '../controllers/receiptController.js';
 const router = express.Router();
 
 // ⚡ Paystack Background Webhook Route
-router.post('/paystack/webhook', paystackWebhook);
+// Uses custom rawBody parser hook to enable HMAC SHA512 signature verification
+router.post(
+  '/paystack/webhook',
+  express.json({
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    }
+  }),
+  paystackWebhook
+);
 
 // Finance Directory Route
 router.get('/directory', verifyToken, getFinanceDirectory);
