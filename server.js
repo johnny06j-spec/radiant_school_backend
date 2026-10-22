@@ -55,17 +55,20 @@ app.use(cors({
     }
   },
   credentials: true,
-  allowedHeaders: ['Content-Type', 'Authorization']
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-paystack-signature']
 }));
 
 // Safe Pre-Flight OPTIONS handler
 app.options('/*splat', cors());
 
-// 💳 Paystack raw body parser placeholder (Must be BEFORE express.json)
-// app.post('/api/payments/webhook', express.raw({ type: 'application/json' }), handlePaystackWebhook);
+// 🛡️ 4. Restrict JSON Payload Size & Capture Unparsed rawBody for Paystack Webhook Verification
+app.use(express.json({
+  limit: '10kb',
+  verify: (req, res, buf) => {
+    req.rawBody = buf;
+  }
+}));
 
-// 🛡️ 4. Restrict JSON Payload Size
-app.use(express.json({ limit: '10kb' }));
 app.use(express.urlencoded({ extended: true, limit: '10kb' }));
 
 // 🛡️ 5. No-Cache Header Middleware for API responses

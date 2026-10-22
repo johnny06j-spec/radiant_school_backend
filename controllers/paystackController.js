@@ -40,7 +40,7 @@ export const initializePayment = async (req, res) => {
     // 🟢 Build callback URL that explicitly maintains studentId context on redirect
     const targetCallbackUrl = callbackUrl 
       ? `${callbackUrl}&reference=${reference}`
-      : `http://localhost:5173/student?studentId=${studentId}&tab=finance&reference=${reference}`;
+      : `https://portal.radiantintellectualscollege.com/student?studentId=${studentId}&tab=finance&reference=${reference}`;
 
     const paystackBody = {
       email,
@@ -133,7 +133,7 @@ export const verifyPayment = async (req, res) => {
     }
 
     // 3. Payment is confirmed! Extract metadata payload
-    const { studentId, paymentType, term, session, email } = paystackData.data.metadata;
+    const { studentId, paymentType, term, session, email } = paystackData.data.metadata || {};
     const verifiedAmount = paystackData.data.amount / 100; // Convert Kobo back to Naira
 
     console.log(`💳 Paystack confirmed ₦${verifiedAmount} for student ID: ${studentId}`);
@@ -204,19 +204,20 @@ export const verifyPayment = async (req, res) => {
 // @route POST /api/finance/paystack/webhook
 export const paystackWebhook = async (req, res) => {
   try {
-    // 1. Verify Paystack Event Signature
+    // 1. Verify Paystack Event Signature using unparsed rawBody
+    const rawPayload = req.rawBody ? req.rawBody : JSON.stringify(req.body);
+    
     const hash = crypto
       .createHmac('sha512', process.env.PAYSTACK_SECRET_KEY)
-      .update(JSON.stringify(req.body))
+      .update(rawPayload)
       .digest('hex');
 
-    if (hash !== req.headers['x-paystack-signature']) {
+    const paystackSignature = req.headers['x-paystack-signature'];
+
+    if (!paystackSignature || hash !== paystackSignature) {
       console.error("⚠️ Invalid Paystack Webhook Signature Received.");
       return res.status(400).send('Invalid signature');
     }
-
-    // Acknowledge receipt to Paystack immediately with a 200 OK
-    res.sendStatus(200);
 
     const event = req.body;
 
@@ -231,7 +232,7 @@ export const paystackWebhook = async (req, res) => {
 
       if (!studentId) {
         console.warn(`⚠️ Webhook received for reference ${reference} without studentId in metadata.`);
-        return;
+        return res.status(200).send('Metadata missing studentId');
       }
 
       // 3. Prevent duplicate ledger entry if already verified by frontend callback
@@ -281,7 +282,11 @@ export const paystackWebhook = async (req, res) => {
       console.log(`✅ Webhook payment reconciliation completed for reference: ${reference}`);
     }
 
+    // Acknowledge receipt to Paystack safely after successful processing
+    return res.status(200).send('Webhook processed successfully');
+
   } catch (error) {
     console.error("💥 Paystack Webhook Exception:", error);
+    return res.status(500).send('Webhook server error');
   }
 };
