@@ -6,7 +6,7 @@ import User from '../models/User.js';
 /**
  * Helper to check if logged-in teacher is assigned to the class
  */
-const verifyClassTeacher = (reqUser, targetClass) => {
+const verifyClassTeacher = (reqUser, targetClass = '') => {
   if (!reqUser) return false;
 
   // 1. Executive / Admin Role Bypass
@@ -16,18 +16,24 @@ const verifyClassTeacher = (reqUser, targetClass) => {
   }
 
   // 2. Primary / Nursery Auto-Assignment Rule
-  const isPrimary = reqUser.schoolSection === 'PRIMARY' || reqUser.schoolSection === 'NURSERY';
-  const assigned = reqUser.assignedClass || reqUser.classTeacherOf;
+  // If target class or user section belongs to Nursery/Primary/Basic, auto-grant access if assigned to that room
+  const targetStr = String(targetClass).trim().toLowerCase();
+  const sectionStr = `${reqUser.schoolSection || ''} ${reqUser.section || ''} ${reqUser.assignedClass || ''} ${targetClass}`.trim();
+  const isPrimaryOrNursery = /primary|nursery|basic|kg|creche|playgroup|pre-school/i.test(sectionStr);
 
-  if (isPrimary && assigned) {
-    if (assigned.trim().toLowerCase() === targetClass.trim().toLowerCase()) {
+  const assigned = reqUser.assignedClass || reqUser.classTeacherOf;
+  const assignedStr = assigned ? String(assigned).trim().toLowerCase() : '';
+
+  if (isPrimaryOrNursery) {
+    // Primary/Nursery teachers automatically manage their room if assigned or if target class matches
+    if (!assignedStr || assignedStr === targetStr) {
       return true;
     }
   }
 
   // 3. Secondary Explicit Assignment Rule
-  if (!assigned) return false;
-  return assigned.trim().toLowerCase() === targetClass.trim().toLowerCase();
+  if (!assignedStr) return false;
+  return assignedStr === targetStr;
 };
 
 /**
