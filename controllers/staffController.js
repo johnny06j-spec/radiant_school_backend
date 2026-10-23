@@ -18,7 +18,7 @@ const getSessionYearPrefix = (sessionStr) => {
 const calculateGrade = (score, section = 'PRIMARY') => {
   const numScore = Number(score) || 0;
 
-  if (section.toUpperCase() === 'PRIMARY') {
+  if (section.toUpperCase() === 'PRIMARY' || section.toUpperCase() === 'NURSERY' || section.toUpperCase() === 'BASIC') {
     if (numScore >= 86) return 'A';
     if (numScore >= 70) return 'B';
     if (numScore >= 50) return 'C';
@@ -86,7 +86,6 @@ export const saveGrid = async (req, res) => {
       };
     });
 
-    // 🟢 UPSERT QUERY: Modifies existing record or inserts if non-existent without throwing E11000 duplicate key error
     const gridQuery = {
       className: targetClass,
       subjectName: targetSubject,
@@ -113,7 +112,7 @@ export const saveGrid = async (req, res) => {
       },
       {
         new: true,
-        upsert: true, // 👈 Performs create or update safely
+        upsert: true,
         runValidators: true
       }
     );
@@ -135,7 +134,7 @@ export const saveGrid = async (req, res) => {
 };
 
 /**
- * @route   POST /api/teachers/register (or /api/teachers)
+ * @route   POST /api/teachers/register
  * @desc    Provision new instructor / HM / Principal profile with explicit campus assignment
  */
 export const registerStaff = async (req, res) => {
@@ -193,9 +192,14 @@ export const registerStaff = async (req, res) => {
     const isExec = assignedRole === 'headmaster' || assignedRole === 'principal' || department === 'Executive Administration';
     const activeSection = schoolSection || 'PRIMARY';
     
-    const finalIsClassTeacher = isExec ? false : (activeSection === 'PRIMARY' ? true : Boolean(isClassTeacher));
-    const finalClassTeacherOf = isExec ? '' : (activeSection === 'PRIMARY' ? (assignedClass || 'KG 1').trim() : (finalIsClassTeacher ? (classTeacherOf || '').trim() : ''));
-    const computedAllocations = isExec ? [] : (activeSection === 'SECONDARY' ? (Array.isArray(subjectAllocations) ? subjectAllocations : []) : [{ className: assignedClass || 'KG 1', subjectName: 'CLASS TEACHER' }]);
+    // 🟢 Flexible check for Primary, Nursery, Basic, KG rooms so teachers get automatic class teacher rights
+    const isEarlyOrPrimary = /primary|nursery|basic|kg|creche|playgroup|pre-school/i.test(activeSection);
+    
+    const targetAssignedClass = (assignedClass || classTeacherOf || 'KG 1').trim();
+
+    const finalIsClassTeacher = isExec ? false : (isEarlyOrPrimary ? true : Boolean(isClassTeacher));
+    const finalClassTeacherOf = isExec ? '' : (isEarlyOrPrimary ? targetAssignedClass : (finalIsClassTeacher ? (classTeacherOf || '').trim() : ''));
+    const computedAllocations = isExec ? [] : (!isEarlyOrPrimary && activeSection === 'SECONDARY' ? (Array.isArray(subjectAllocations) ? subjectAllocations : []) : [{ className: targetAssignedClass, subjectName: 'CLASS TEACHER' }]);
 
     const newStaff = await User.create({
       name: fullName,
@@ -209,7 +213,7 @@ export const registerStaff = async (req, res) => {
       phone: phone ? phone.trim() : '',
       schoolSection: activeSection,
       department: isExec ? 'Executive Administration' : (department || 'General'),
-      assignedClass: isExec ? 'N/A' : (activeSection === 'PRIMARY' ? (assignedClass || 'KG 1') : 'N/A'),
+      assignedClass: isExec ? 'N/A' : targetAssignedClass,
       isClassTeacher: finalIsClassTeacher,
       classTeacherOf: finalClassTeacherOf,
       subjectAllocations: computedAllocations,
@@ -299,18 +303,20 @@ export const updateStaff = async (req, res) => {
     
     updateFields.schoolSection = activeSection;
 
+    const isEarlyOrPrimary = /primary|nursery|basic|kg|creche|playgroup|pre-school/i.test(activeSection);
+
     if (isExec) {
       updateFields.assignedClass = 'N/A';
       updateFields.isClassTeacher = false;
       updateFields.classTeacherOf = '';
       updateFields.subjectAllocations = [];
       updateFields.department = 'Executive Administration';
-    } else if (activeSection === 'PRIMARY') {
-      const primaryClass = (assignedClass || staffUser.assignedClass || 'KG 1').trim();
-      updateFields.assignedClass = primaryClass;
+    } else if (isEarlyOrPrimary) {
+      const earlyClass = (assignedClass || classTeacherOf || staffUser.assignedClass || staffUser.classTeacherOf || 'KG 1').trim();
+      updateFields.assignedClass = earlyClass;
       updateFields.isClassTeacher = true;
-      updateFields.classTeacherOf = primaryClass;
-      updateFields.subjectAllocations = [{ className: primaryClass, subjectName: 'CLASS TEACHER' }];
+      updateFields.classTeacherOf = earlyClass;
+      updateFields.subjectAllocations = [{ className: earlyClass, subjectName: 'CLASS TEACHER' }];
     } else {
       updateFields.assignedClass = assignedClass ? assignedClass.trim() : (staffUser.assignedClass || 'N/A');
       updateFields.isClassTeacher = Boolean(isClassTeacher);
