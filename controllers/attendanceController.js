@@ -9,30 +9,33 @@ import User from '../models/User.js';
 const verifyClassTeacher = (reqUser, targetClass = '') => {
   if (!reqUser) return false;
 
-  // 1. Executive / Admin Role Bypass
+  // 1. Executive / Admin / Management Role Bypass
   const userRole = reqUser.role?.toLowerCase() || '';
   if (['admin', 'executive', 'headmaster', 'principal'].includes(userRole)) {
     return true;
   }
 
-  // 2. Primary / Nursery Auto-Assignment Rule
-  // If target class or user section belongs to Nursery/Primary/Basic, auto-grant access if assigned to that room
-  const targetStr = String(targetClass).trim().toLowerCase();
-  const sectionStr = `${reqUser.schoolSection || ''} ${reqUser.section || ''} ${reqUser.assignedClass || ''} ${targetClass}`.trim();
+  // 2. Normalize both targetClass and teacher assigned strings (remove spaces, lowercase)
+  const formatStr = (str) => String(str || '').trim().toLowerCase().replace(/\s+/g, '');
+  const targetStr = formatStr(targetClass);
+
+  // Check all possible class assignment fields on the user profile
+  const assignedRaw = reqUser.classTeacherOf || reqUser.assignedClass || (reqUser.assignedClasses && reqUser.assignedClasses[0]) || '';
+  const assignedStr = formatStr(assignedRaw);
+
+  const sectionStr = `${reqUser.schoolSection || ''} ${reqUser.section || ''}`.trim().toLowerCase();
   const isPrimaryOrNursery = /primary|nursery|basic|kg|creche|playgroup|pre-school/i.test(sectionStr);
 
-  const assigned = reqUser.assignedClass || reqUser.classTeacherOf;
-  const assignedStr = assigned ? String(assigned).trim().toLowerCase() : '';
-
+  // 3. Primary / Nursery Auto-Grant Access
   if (isPrimaryOrNursery) {
-    // Primary/Nursery teachers automatically manage their room if assigned or if target class matches
-    if (!assignedStr || assignedStr === targetStr) {
+    if (!assignedStr || assignedStr === 'n/a' || assignedStr === targetStr) {
       return true;
     }
   }
 
-  // 3. Secondary Explicit Assignment Rule
-  if (!assignedStr) return false;
+  // 4. Secondary Explicit Assignment Matching (e.g., "jss3" === "jss3")
+  if (!assignedStr || assignedStr === 'n/a') return false;
+
   return assignedStr === targetStr;
 };
 
@@ -219,14 +222,12 @@ export const getStudentAttendanceHistory = async (req, res) => {
   try {
     const { term: rawTerm, session: rawSession } = req.query;
 
-    // 1. Resolve target student ID (Support both linked Student record and explicit query)
     let targetStudentId = req.query.studentId;
 
     if (!targetStudentId && req.user) {
       if (req.user.studentId) {
         targetStudentId = req.user.studentId;
       } else {
-        // Look up Student record matching this user account
         const studentProfile = await Student.findOne({ 
           $or: [{ user: req.user._id }, { _id: req.user._id }] 
         }).select('_id').lean();
@@ -238,14 +239,12 @@ export const getStudentAttendanceHistory = async (req, res) => {
     let termFilter = rawTerm;
     let sessionFilter = rawSession;
 
-    // Parse combined term string e.g., "First Term (2026/2027)" into distinct parameters
     if (rawTerm && rawTerm.includes('(')) {
       const parts = rawTerm.split('(');
       termFilter = parts[0].trim();
       sessionFilter = parts[1].replace(')', '').trim();
     }
 
-    // 2. Query attendance with flexible ID matching
     const filter = {
       $or: [
         { studentId: targetStudentId },
