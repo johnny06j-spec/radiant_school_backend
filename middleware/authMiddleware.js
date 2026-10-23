@@ -84,15 +84,18 @@ export const isStudent = (req, res, next) => {
 };
 
 /**
- * 🛡️ Role Gate: Teacher & Admin Enforcer
+ * 🛡️ Role Gate: Teacher, Staff & Admin Enforcer
  */
 export const protectTeacher = (req, res, next) => {
   const userRole = req.user?.role?.toLowerCase();
-  if (['teacher', 'class teacher', 'admin', 'executive'].includes(userRole)) {
+  const allowedRoles = ['teacher', 'class teacher', 'headmaster', 'principal', 'admin', 'executive', 'staff'];
+
+  if (allowedRoles.includes(userRole) || req.user?.schoolSection || req.user?.isClassTeacher) {
     next();
   } else {
     return res.status(403).json({ 
       success: false, 
+      isNotClassTeacher: true,
       message: "Forbidden Access. Teacher or Administrative clearance required." 
     });
   }
