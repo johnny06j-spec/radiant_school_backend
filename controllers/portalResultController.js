@@ -286,14 +286,31 @@ export const getStudentPortalResults = async (req, res) => {
       });
     }
 
-    // 🟢 STRICT GLOBAL ACTIVE DEBT GATE: Check total live debt across all terms/sessions
+    // 🟢 ACCURATE CAMPUS & CLASS DEBT GATE: Filter fee structures strictly by student's campus and class
+    const studentCampus = student.campus || 'Emerald Campus';
+    const studentClass = student.currentClass || student.assignedClass || '';
+    const normClass = normalizeClassName(studentClass);
+
     const basePreviousOutstanding = Number(student.previousOutstanding) || 0;
-    const allStructures = await FeeStructure.find({}).lean();
+
+    // Search fee structures matching student's campus and class
+    const relevantStructures = await FeeStructure.find({
+      $and: [
+        { $or: [{ campus: studentCampus }, { campus: { $exists: false } }, { campus: null }] },
+        {
+          $or: [
+            { className: studentClass },
+            { className: new RegExp(`^${studentClass}$`, 'i') },
+            { className: normClass }
+          ]
+        }
+      ]
+    }).lean();
 
     let totalGlobalFeesExpected = basePreviousOutstanding;
 
-    // Aggregate all historical & current expectations across all active fee structures
-    allStructures.forEach(struct => {
+    // Aggregate fee expectations strictly for this student's campus & class
+    relevantStructures.forEach(struct => {
       const intakeSession = String(student.intakeSession || student.admittedSession || student.admissionSession || '').trim();
       const studentType = intakeSession === struct.session ? 'New Students' : 'Returning Students';
 
@@ -304,7 +321,7 @@ export const getStudentPortalResults = async (req, res) => {
       });
     });
 
-    // Aggregate all financial adjustments (increases/discounts)
+    // Aggregate all financial adjustments for this student (increases/discounts)
     const adjustments = await Adjustment.find({ studentId: student._id }).lean();
     adjustments.forEach(adj => {
       const amt = Number(adj.amount) || 0;
@@ -312,14 +329,14 @@ export const getStudentPortalResults = async (req, res) => {
       if (adj.type === 'Discount' || adj.type === 'Waiver') totalGlobalFeesExpected -= amt;
     });
 
-    // Aggregate all-time successful payments
+    // Aggregate all-time successful payments made by this student
     const successfulPayments = await Payment.find({ studentId: student._id, status: 'Successful' }).lean();
     const totalPaidAllTime = successfulPayments.reduce((sum, p) => sum + (Number(p.amountPaid) || 0), 0);
 
-    // Calculate live active global balance
+    // Calculate live active balance for this student
     const activeGlobalDebt = Math.max(0, totalGlobalFeesExpected - totalPaidAllTime);
 
-    // If the student owes ANY money anywhere on their account, lock ALL report cards
+    // Lock results ONLY if student has a real outstanding balance for THEIR campus & class
     if (activeGlobalDebt > 0) {
       return res.status(200).json({
         success: true,
