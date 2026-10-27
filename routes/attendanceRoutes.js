@@ -6,18 +6,18 @@ import {
   getWeeklyReportData, 
   getStudentAttendanceHistory 
 } from '../controllers/attendanceController.js';
-import { protectTeacher, protectStudent } from '../middleware/authMiddleware.js';
+import { verifyToken, protectTeacher, protectStudent } from '../middleware/authMiddleware.js';
 
 const router = express.Router();
 
 // 🟢 Both /sheet and /class-sheet endpoints mapped safely
-router.get('/sheet', protectTeacher, getClassAttendanceSheet);
-router.get('/class-sheet', protectTeacher, getClassAttendanceSheet);
+router.get('/sheet', verifyToken, protectTeacher, getClassAttendanceSheet);
+router.get('/class-sheet', verifyToken, protectTeacher, getClassAttendanceSheet);
 
-router.post('/submit', protectTeacher, saveClassAttendance);
-router.post('/save', protectTeacher, saveClassAttendance);
+router.post('/submit', verifyToken, protectTeacher, saveClassAttendance);
+router.post('/save', verifyToken, protectTeacher, saveClassAttendance);
 
-router.get('/weekly-report', protectTeacher, getWeeklyReportData);
-router.get('/student-portal', protectStudent, getStudentAttendanceHistory);
+router.get('/weekly-report', verifyToken, protectTeacher, getWeeklyReportData);
+router.get('/student-portal', verifyToken, protectStudent, getStudentAttendanceHistory);
 
 export default router;

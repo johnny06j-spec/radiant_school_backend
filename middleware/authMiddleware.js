@@ -86,32 +86,39 @@ export const isStudent = (req, res, next) => {
 /**
  * 🛡️ Role Gate: Teacher, Staff & Admin Enforcer
  */
-export const protectTeacher = (req, res, next) => {
-  const userRole = req.user?.role?.toLowerCase();
-  const allowedRoles = ['teacher', 'class teacher', 'headmaster', 'principal', 'admin', 'executive', 'staff'];
-
-  if (allowedRoles.includes(userRole) || req.user?.schoolSection || req.user?.isClassTeacher) {
-    next();
-  } else {
-    return res.status(403).json({ 
-      success: false, 
-      isNotClassTeacher: true,
-      message: "Forbidden Access. Teacher or Administrative clearance required." 
-    });
+export const protectTeacher = async (req, res, next) => {
+  if (!req.user) {
+    return verifyToken(req, res, () => protectTeacher(req, res, next));
   }
+
+  const userRole = req.user?.role?.toLowerCase() || '';
+  const allowedRoles = ['teacher', 'class teacher', 'headmaster', 'principal', 'admin', 'executive', 'staff', 'faculty'];
+
+  if (allowedRoles.includes(userRole) || req.user?.schoolSection || req.user?.isClassTeacher || req.user?.classTeacherOf) {
+    return next();
+  }
+
+  return res.status(403).json({ 
+    success: false, 
+    message: "Forbidden Access. Teacher or Administrative clearance required." 
+  });
 };
 
 /**
  * 🧑‍🎓 Role Gate: Student Account Token Enforcer
  */
-export const protectStudent = (req, res, next) => {
-  const userRole = req.user?.role?.toLowerCase();
-  if (userRole === 'student' || req.user?.admissionNo) {
-    next();
-  } else {
-    return res.status(403).json({ 
-      success: false, 
-      message: "Forbidden Access. Student account token context signature required." 
-    });
+export const protectStudent = async (req, res, next) => {
+  if (!req.user) {
+    return verifyToken(req, res, () => protectStudent(req, res, next));
   }
+
+  const userRole = req.user?.role?.toLowerCase() || '';
+  if (userRole === 'student' || req.user?.admissionNo) {
+    return next();
+  }
+
+  return res.status(403).json({ 
+    success: false, 
+    message: "Forbidden Access. Student account token context signature required." 
+  });
 };
