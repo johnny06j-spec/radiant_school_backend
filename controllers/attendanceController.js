@@ -11,17 +11,15 @@ const verifyClassTeacher = (reqUser, targetClass = '') => {
 
   // 1. Executive / Admin / Management Role Bypass
   const userRole = reqUser.role?.toLowerCase() || '';
-  if (['admin', 'executive', 'headmaster', 'principal'].includes(userRole)) {
+  if (['admin', 'executive', 'headmaster', 'principal', 'proprietor'].includes(userRole)) {
     return true;
   }
 
-  // Helper function to strip spaces, special characters, and lowercase for robust comparison
+  // 2. Normalize strings (strip non-alphanumeric characters and lowercase)
   const normalize = (str) => String(str || '').toLowerCase().replace(/[^a-z0-9]/g, '');
-
   const targetNorm = normalize(targetClass);
-  if (!targetNorm) return false;
 
-  // 2. Gather ALL class fields attached to teacher profile
+  // 3. Gather all assigned class fields on the teacher profile
   const assignedClassesList = [
     reqUser.classTeacherOf,
     reqUser.assignedClass,
@@ -29,17 +27,21 @@ const verifyClassTeacher = (reqUser, targetClass = '') => {
     ...(Array.isArray(reqUser.subjectAllocations) ? reqUser.subjectAllocations.map(s => s.className) : [])
   ].filter(Boolean).map(c => normalize(c));
 
-  // 🟢 DIRECT MATCH: If targetClass matches ANY assigned class field, grant immediate access!
-  if (assignedClassesList.includes(targetNorm)) {
+  // 🟢 DIRECT MATCH: Match normalized target class against any assigned class field
+  if (targetNorm && assignedClassesList.includes(targetNorm)) {
     return true;
   }
 
-  // 3. Primary / Nursery Section Fallback Rule
+  // 4. Role & Flag Bypass: If user is flagged as a class teacher or teacher staff, grant access
+  if (reqUser.isClassTeacher || ['teacher', 'class teacher', 'staff', 'faculty'].includes(userRole)) {
+    return true;
+  }
+
+  // 5. Primary / Nursery Fallback
   const sectionStr = `${reqUser.schoolSection || ''} ${reqUser.section || ''} ${reqUser.department || ''}`.toLowerCase();
   const isPrimaryOrNursery = /primary|nursery|basic|kg|creche|playgroup|pre-school/i.test(sectionStr);
 
   if (isPrimaryOrNursery) {
-    // If no explicit class assignment exists on primary account, default to open access for primary teachers
     if (assignedClassesList.length === 0 || assignedClassesList.includes('na')) {
       return true;
     }
@@ -184,7 +186,6 @@ export const getWeeklyReportData = async (req, res) => {
     const reportData = students.map(st => {
       const studentLogs = attendanceRecords.filter(r => r.studentId.toString() === st._id.toString());
       
-      // Index attendance status by YYYY-MM-DD string
       const logsByDate = {};
       studentLogs.forEach(log => {
         const dStr = new Date(log.date).toISOString().split('T')[0];
