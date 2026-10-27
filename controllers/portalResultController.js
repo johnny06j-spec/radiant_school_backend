@@ -47,12 +47,12 @@ const getTermOrder = (termName) => {
 
 /**
  * @route   GET /api/teachers/download-result-pdf/:studentId
- * @desc    Generate printable report card matching the Headmaster/Principal signed-off data
+ * @desc    Generate printable/downloadable report card HTML
  */
 export const downloadStudentResultPdf = async (req, res) => {
   try {
     const { studentId } = req.params;
-    const { term, session, className } = req.query;
+    const { term, session, className, download } = req.query;
 
     const studentDoc = await Student.findById(studentId).lean().catch(() => null);
     
@@ -233,7 +233,8 @@ export const downloadStudentResultPdf = async (req, res) => {
               <p><strong>${execTitle}:</strong> "${review?.principalRemark || 'Satisfactory academic performance.'}"</p>
             </div>
           </div>
-          <script>window.onload = function() { window.print(); }</script>
+
+          ${download === 'true' ? '' : '<script>window.onload = function() { window.print(); }</script>'}
         </body>
       </html>
     `;
