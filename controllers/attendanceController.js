@@ -15,28 +15,37 @@ const verifyClassTeacher = (reqUser, targetClass = '') => {
     return true;
   }
 
-  // 2. Normalize both targetClass and teacher assigned strings (remove spaces, lowercase)
-  const formatStr = (str) => String(str || '').trim().toLowerCase().replace(/\s+/g, '');
-  const targetStr = formatStr(targetClass);
+  // Helper function to strip spaces, special characters, and lowercase for robust comparison
+  const normalize = (str) => String(str || '').toLowerCase().replace(/[^a-z0-9]/g, '');
 
-  // Check all possible class assignment fields on the user profile
-  const assignedRaw = reqUser.classTeacherOf || reqUser.assignedClass || (reqUser.assignedClasses && reqUser.assignedClasses[0]) || '';
-  const assignedStr = formatStr(assignedRaw);
+  const targetNorm = normalize(targetClass);
+  if (!targetNorm) return false;
 
-  const sectionStr = `${reqUser.schoolSection || ''} ${reqUser.section || ''}`.trim().toLowerCase();
+  // 2. Gather ALL class fields attached to teacher profile
+  const assignedClassesList = [
+    reqUser.classTeacherOf,
+    reqUser.assignedClass,
+    ...(Array.isArray(reqUser.assignedClasses) ? reqUser.assignedClasses : []),
+    ...(Array.isArray(reqUser.subjectAllocations) ? reqUser.subjectAllocations.map(s => s.className) : [])
+  ].filter(Boolean).map(c => normalize(c));
+
+  // 🟢 DIRECT MATCH: If targetClass matches ANY assigned class field, grant immediate access!
+  if (assignedClassesList.includes(targetNorm)) {
+    return true;
+  }
+
+  // 3. Primary / Nursery Section Fallback Rule
+  const sectionStr = `${reqUser.schoolSection || ''} ${reqUser.section || ''} ${reqUser.department || ''}`.toLowerCase();
   const isPrimaryOrNursery = /primary|nursery|basic|kg|creche|playgroup|pre-school/i.test(sectionStr);
 
-  // 3. Primary / Nursery Auto-Grant Access
   if (isPrimaryOrNursery) {
-    if (!assignedStr || assignedStr === 'n/a' || assignedStr === targetStr) {
+    // If no explicit class assignment exists on primary account, default to open access for primary teachers
+    if (assignedClassesList.length === 0 || assignedClassesList.includes('na')) {
       return true;
     }
   }
 
-  // 4. Secondary Explicit Assignment Matching (e.g., "jss3" === "jss3")
-  if (!assignedStr || assignedStr === 'n/a') return false;
-
-  return assignedStr === targetStr;
+  return false;
 };
 
 /**
