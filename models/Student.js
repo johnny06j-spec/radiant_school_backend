@@ -1,6 +1,26 @@
 // models/Student.js
 import mongoose from 'mongoose';
 
+/**
+ * Helper to normalize student class names on save
+ */
+const normalizeClassName = (className) => {
+  if (!className) return "";
+  let normalized = className.trim().toUpperCase();
+  return normalized
+    .replace(/\bKG\s*I\b/g, 'KG 1')
+    .replace(/\bKG\s*II\b/g, 'KG 2')
+    .replace(/\bKG\s*III\b/g, 'KG 3')
+    .replace(/\bPRIMARY\s*/g, 'BASIC ')
+    .replace(/\bGRADE\s*/g, 'BASIC ')
+    .replace(/\bJSS\s*I\b/g, 'JSS 1')
+    .replace(/\bJSS\s*II\b/g, 'JSS 2')
+    .replace(/\bJSS\s*III\b/g, 'JSS 3')
+    .replace(/\bSSS\s*I\b/g, 'SSS 1')
+    .replace(/\bSSS\s*II\b/g, 'SSS 2')
+    .replace(/\bSSS\s*III\b/g, 'SSS 3');
+};
+
 const studentSchema = new mongoose.Schema({
   user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
   name: { type: String, required: true, uppercase: true },
@@ -8,13 +28,14 @@ const studentSchema = new mongoose.Schema({
   firstName: { type: String, trim: true },
   otherName: { type: String, trim: true },
   admissionNo: { type: String, required: true, unique: true },
-  currentClass: { type: String, required: true },
+  currentClass: { type: String, required: true, trim: true },
 
   // 🏫 MULTI-CAMPUS IDENTIFIER
   campus: {
     type: String,
     required: [true, 'School campus selection is required'],
     enum: ['Emerald Campus', 'Great Campus'],
+    trim: true,
     default: 'Emerald Campus'
   },
 
@@ -79,8 +100,16 @@ const studentSchema = new mongoose.Schema({
   status: { type: String, default: "Active" }
 }, { timestamps: true });
 
-// 🟢 Pre-save middleware cleanly synchronizes intake aliases and address fields
+// 🟢 Pre-save middleware cleanly synchronizes intake aliases, campus string, and normalized class names
 studentSchema.pre('save', function (next) {
+  if (this.currentClass) {
+    this.currentClass = normalizeClassName(this.currentClass);
+  }
+
+  if (this.campus) {
+    this.campus = String(this.campus).trim();
+  }
+
   if (this.intakeSession) {
     if (!this.admittedSession) this.admittedSession = this.intakeSession;
     if (!this.admissionSession) this.admissionSession = this.intakeSession;
