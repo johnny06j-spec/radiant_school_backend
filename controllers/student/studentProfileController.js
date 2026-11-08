@@ -50,8 +50,8 @@ export const getStudentProfile = async (req, res) => {
     const currentSession = systemConfig.currentSession;
     const currentTerm = systemConfig.currentTerm;
 
-    // 🟢 Strict trimmed string + case-insensitive regex for campus
-    const studentCampus = String(student.campus || 'Emerald Campus').trim();
+    // 🟢 Strict trimmed string + campus fallback check
+    const studentCampus = String(student.campus || student.user?.campus || 'Emerald Campus').trim();
     const campusRegex = new RegExp(`^${studentCampus.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}$`, 'i');
 
     const actualAdmissionSession = String(student.admittedSession || student.admissionSession || student.intakeSession || currentSession).trim();
@@ -84,7 +84,7 @@ export const getStudentProfile = async (req, res) => {
     const adjustmentIncreases = adjustments.filter(adj => adj.type === 'Fee Increase');
     const totalDiscountsWaivers = adjustmentCredits.reduce((sum, adj) => sum + (Number(adj.amount) || 0), 0);
 
-    // 🟢 Query fee structures explicitly matching this campus via regex
+    // 🟢 Query fee structures explicitly matching this student's campus via case-insensitive regex
     const allStructures = await FeeStructure.find({ 
       campus: campusRegex 
     }).lean();
@@ -132,22 +132,21 @@ export const getStudentProfile = async (req, res) => {
     const currentClassContext = resolveClassForTerm(currentSession, currentTerm);
     const studentNormalizedClass = normalizeClassName(currentClassContext);
 
-    // 🟢 Match campus, class, session, and term strictly
-    const currentStructure = allStructures.find(struct => {
-      const isCampusMatch = String(struct.campus).trim().toLowerCase() === studentCampus.toLowerCase();
-      const isClassMatch = normalizeClassName(struct.className) === studentNormalizedClass;
-      const isSessionMatch = String(struct.session).trim() === String(currentSession).trim();
-      const isTermMatch = new RegExp(`^${currentTerm.trim()}$`, 'i').test(struct.term?.trim() || '');
-      return isCampusMatch && isClassMatch && isSessionMatch && isTermMatch;
-    });
+    // 🟢 Strict multi-field structure match
+    const currentStructure = allStructures.find(struct => 
+      String(struct.campus).trim().toLowerCase() === studentCampus.toLowerCase() &&
+      normalizeClassName(struct.className) === studentNormalizedClass &&
+      String(struct.session).trim() === String(currentSession).trim() &&
+      new RegExp(`^${currentTerm.trim()}$`, 'i').test(struct.term?.trim() || '')
+    );
 
-    const isStructureActive = currentStructure?.status === 'Active' || currentStructure?.status === 'active';
+    const isStructureActive = Boolean(currentStructure && (currentStructure.status === 'Active' || currentStructure.status === 'active'));
 
     let rawCurrentTermFee = 0;
     let currentPersonalizedItems = []; 
-    let currentStudentType = actualAdmissionSession === currentSession ? 'New Students' : 'Returning Students';
+    let currentStudentType = (actualAdmissionSession === currentSession) ? 'New Students' : 'Returning Students';
 
-    if (currentStructure) {
+    if (currentStructure && isStructureActive) {
       const activeItems = (currentStructure.items || []).filter(item => 
         item.checked !== false && (item.appliesTo === 'All Students' || item.appliesTo === currentStudentType)
       );
@@ -158,7 +157,9 @@ export const getStudentProfile = async (req, res) => {
         appliesTo: item.appliesTo
       }));
 
-      const currentIncreases = adjustmentIncreases.filter(adj => adj.session === currentSession && new RegExp(`^${currentTerm.trim()}$`, 'i').test(adj.term?.trim() || ''));
+      const currentIncreases = adjustmentIncreases.filter(adj => 
+        adj.session === currentSession && new RegExp(`^${currentTerm.trim()}$`, 'i').test(adj.term?.trim() || '')
+      );
       currentIncreases.forEach(adj => {
         currentPersonalizedItems.push({
           name: `[Fee Increase] ${adj.reason}`,
