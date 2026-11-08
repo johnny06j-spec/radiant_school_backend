@@ -78,7 +78,7 @@ export const saveFeeStructure = async (req, res) => {
 
     return res.status(200).json({
       success: true,
-      message: `Fee structure for ${normalizedClass} - ${finalCampus} (${activeSession} - ${activeTerm}) saved successfully!`,
+      message: `Fee structure for ${normalizedClass} (${finalCampus}) saved successfully!`,
       data: structure
     });
   } catch (error) {
@@ -87,7 +87,7 @@ export const saveFeeStructure = async (req, res) => {
   }
 };
 
-// @desc Fetch all saved fee configurations (Optionally filtered by query params)
+// @desc Fetch all saved fee configurations (Strictly isolated by requested campus)
 // @route GET /api/finance/structures
 export const getFeeStructures = async (req, res) => {
   try {
@@ -98,7 +98,7 @@ export const getFeeStructures = async (req, res) => {
     if (term) filter.term = term;
     if (className) filter.className = normalizeClassName(className);
 
-    // Flexible Campus Filter: Only apply if a specific campus (not "All Campuses" or "undefined") is requested
+    // 🟢 STRICT CAMPUS ISOLATION: Match exact campus name
     if (campus && campus !== 'All Campuses' && campus !== 'undefined' && campus !== 'null') {
       filter.campus = campus;
     }
@@ -180,6 +180,7 @@ export const getFinanceDirectory = async (req, res) => {
       ]
     };
 
+    // 🟢 STRICT CAMPUS FILTERING FOR STUDENT DIRECTORY
     if (campus && campus !== 'All Campuses') {
       query.campus = campus;
     }
