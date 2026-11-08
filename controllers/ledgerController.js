@@ -3,7 +3,7 @@ import Student from '../models/Student.js';
 import FeeStructure from '../models/FeeStructure.js';
 import Payment from '../models/Payment.js';
 import Adjustment from '../models/Adjustment.js';
-import ResultReview from '../models/ResultReview.js'; // 🟢 Added to resolve historical class context
+import ResultReview from '../models/ResultReview.js';
 import { normalizeClassName, isOlderTerm, isStudentEnrolledInTerm } from './financeHelpers.js';
 
 // @desc Dynamically calculate and stream student statements with term-isolated allocation
@@ -17,10 +17,15 @@ export const getStudentLedger = async (req, res) => {
       return res.status(400).json({ success: false, message: "Missing term or session query parameters." });
     }
 
-    const student = await Student.findById(studentId);
+    const student = await Student.findById(studentId).populate('user', 'campus');
     if (!student) {
       return res.status(404).json({ success: false, message: "Student record profile not found." });
     }
+
+    // 🟢 STRICT CAMPUS ISOLATION KEY
+    const rawCampus = student.campus || student.user?.campus || req.user?.campus;
+    const studentCampus = String(rawCampus && String(rawCampus).trim() !== '' ? rawCampus : 'Great Campus').trim();
+    const campusRegex = new RegExp(`^${studentCampus.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}$`, 'i');
 
     const targetTermRegex = new RegExp(`^${term.trim()}$`, 'i');
 
@@ -46,14 +51,14 @@ export const getStudentLedger = async (req, res) => {
       .filter(adj => adj.type === 'Discount' || adj.type === 'Waiver')
       .reduce((sum, adj) => sum + (Number(adj.amount) || 0), 0);
 
-    // Fetch ALL fee structures to compile historical session expectations dynamically
-    const allStructures = await FeeStructure.find({}).lean();
+    // 🟢 FETCH ONLY FEE STRUCTURES MATCHING THIS STUDENT'S CAMPUS
+    const allStructures = await FeeStructure.find({ campus: campusRegex }).lean();
     
     // 🟢 CALCULATE LEGITIMATE HISTORICAL DEBT WITH HISTORICAL CLASS RESOLUTION
     let pastExpectations = 0;
     allStructures.forEach(struct => {
       const isHistorical = isOlderTerm(struct.session, struct.term, session, term);
-      const wasEnrolled = isStudentEnrolledInTerm(student, struct.session, struct.term);
+      const wasEnrolled = isStudentEnrolledInTerm(student, struct.session, struct.term, studentCampus);
 
       const historicalClassForStruct = resolveClassForTerm(struct.session, struct.term);
       const normalizedHistoricalClass = normalizeClassName(historicalClassForStruct);
@@ -79,11 +84,12 @@ export const getStudentLedger = async (req, res) => {
     const currentClassContext = resolveClassForTerm(session, term);
     const studentNormalizedClass = normalizeClassName(currentClassContext);
 
-    // Extract current target term structure configurations
+    // Extract current target term structure configurations strictly matching student's campus
     const currentStructure = allStructures.find(struct => 
       normalizeClassName(struct.className) === studentNormalizedClass &&
       struct.session === session &&
-      targetTermRegex.test(struct.term?.trim() || '')
+      targetTermRegex.test(struct.term?.trim() || '') &&
+      campusRegex.test(struct.campus?.trim() || '')
     );
 
     const isStructureActive = currentStructure?.status === 'Active' || currentStructure?.status === 'active';
@@ -93,7 +99,7 @@ export const getStudentLedger = async (req, res) => {
     let currentStudentType = intakeSession === session ? 'New Students' : 'Returning Students';
 
     if (currentStructure) {
-      const activeItems = currentStructure.items.filter(item => 
+      const activeItems = (currentStructure.items || []).filter(item => 
         item.checked !== false && (item.appliesTo === 'All Students' || item.appliesTo === currentStudentType)
       );
       
@@ -150,7 +156,7 @@ export const getStudentLedger = async (req, res) => {
 
     const currentExpected = currentPersonalizedItems.reduce((sum, item) => sum + item.amount, 0);
 
-    // 🟢 FETCH ALL SUCCESSFUL PAYMENTS CHRONOLOGICALLY
+    // Fetch all successful payments chronologically
     const allSuccessfulPayments = await Payment.find({ studentId: student._id, status: 'Successful' })
       .sort({ createdAt: -1 })
       .lean();
@@ -180,10 +186,9 @@ export const getStudentLedger = async (req, res) => {
     res.status(200).json({
       success: true,
       data: {
-        student: { ...student.toObject(), currentClass: currentClassContext },
+        student: { ...student.toObject(), campus: studentCampus, currentClass: currentClassContext },
         studentType: currentStudentType,
         items: isStructureActive ? currentPersonalizedItems : [],
-        // 🟢 RETURN FULL PAYMENT HISTORY FOR THE LEDGER RECEIPT TABLE
         paymentHistory: allSuccessfulPayments,
         currentTermFee: finalCurrentExpected,
         totalPaid: aggregatePaidAllTime,
