@@ -257,14 +257,13 @@ export const unlinkSibling = async (req, res) => {
 
 /**
  * @route   GET /api/students/profile/me
- * @desc    Fetch profile dashboard data for current student (or targeted student via req.query.studentId)
+ * @desc    Fetch profile dashboard data for current student (strictly isolated by campus & class)
  * @access  Private (Student)
  */
 export const getStudentProfile = async (req, res) => {
   try {
     const targetId = req.query.studentId || req.params.id;
     
-    // Safely validate targetId if present
     if (targetId && !mongoose.Types.ObjectId.isValid(targetId)) {
       return res.status(400).json({ success: false, message: "Invalid student identifier format." });
     }
@@ -292,7 +291,7 @@ export const getStudentProfile = async (req, res) => {
     const currentSession = systemConfig.currentSession;
     const currentTerm = systemConfig.currentTerm;
 
-    const studentCampus = student.campus || 'Emerald Campus';
+    const studentCampus = String(student.campus || 'Emerald Campus').trim();
 
     const actualAdmissionSession = String(student.admittedSession || student.admissionSession || student.intakeSession || currentSession).trim();
     
@@ -324,8 +323,10 @@ export const getStudentProfile = async (req, res) => {
     const adjustmentIncreases = adjustments.filter(adj => adj.type === 'Fee Increase');
     const totalDiscountsWaivers = adjustmentCredits.reduce((sum, adj) => sum + (Number(adj.amount) || 0), 0);
 
-    // 🟢 STRICT CAMPUS ISOLATION: Fetch fee structures strictly matching this student's campus
-    const allStructures = await FeeStructure.find({ campus: studentCampus }).lean();
+    // 🟢 STRICT CAMPUS QUERY: Only retrieve fee structures explicitly matching this student's campus
+    const allStructures = await FeeStructure.find({ 
+      campus: studentCampus 
+    }).lean();
     allStructures.sort(compareStructuresChronologically);
     
     let historicalFeeItemsBreakdown = []; 
@@ -370,9 +371,9 @@ export const getStudentProfile = async (req, res) => {
     const currentClassContext = resolveClassForTerm(currentSession, currentTerm);
     const studentNormalizedClass = normalizeClassName(currentClassContext);
 
-    // 🟢 STRICT CAMPUS ISOLATION: Find current term structure strictly for studentCampus
+    // 🟢 STRICT MATCHING: Verify campus AND class AND session AND term
     const currentStructure = allStructures.find(struct => 
-      struct.campus === studentCampus &&
+      String(struct.campus).trim() === studentCampus &&
       normalizeClassName(struct.className) === studentNormalizedClass &&
       struct.session === currentSession &&
       new RegExp(`^${currentTerm.trim()}$`, 'i').test(struct.term?.trim() || '')
@@ -385,7 +386,7 @@ export const getStudentProfile = async (req, res) => {
     let currentStudentType = actualAdmissionSession === currentSession ? 'New Students' : 'Returning Students';
 
     if (currentStructure) {
-      const activeItems = currentStructure.items.filter(item => 
+      const activeItems = (currentStructure.items || []).filter(item => 
         item.checked !== false && (item.appliesTo === 'All Students' || item.appliesTo === currentStudentType)
       );
       
@@ -483,7 +484,7 @@ export const getStudentProfile = async (req, res) => {
         lastName: student.surname || student.lastName || student.user?.lastName || student.user?.name?.split(' ')[1] || "",
         email: student.email || student.user?.email || "N/A",
         admissionNo: student.admissionNo || student.admissionCode || "N/A",
-        campus: student.campus || 'Emerald Campus',
+        campus: studentCampus,
         dob: student.dob || "N/A", 
         gender: student.gender || "N/A",
         address: student.address || student.residentialAddress || "N/A",
