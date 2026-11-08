@@ -324,9 +324,8 @@ export const getStudentProfile = async (req, res) => {
     const adjustmentIncreases = adjustments.filter(adj => adj.type === 'Fee Increase');
     const totalDiscountsWaivers = adjustmentCredits.reduce((sum, adj) => sum + (Number(adj.amount) || 0), 0);
 
-    const allStructures = await FeeStructure.find({
-      $or: [{ campus: studentCampus }, { campus: {$exists: false } }]
-    }).lean();
+    // 🟢 STRICT CAMPUS ISOLATION: Fetch fee structures strictly matching this student's campus
+    const allStructures = await FeeStructure.find({ campus: studentCampus }).lean();
     allStructures.sort(compareStructuresChronologically);
     
     let historicalFeeItemsBreakdown = []; 
@@ -371,7 +370,9 @@ export const getStudentProfile = async (req, res) => {
     const currentClassContext = resolveClassForTerm(currentSession, currentTerm);
     const studentNormalizedClass = normalizeClassName(currentClassContext);
 
+    // 🟢 STRICT CAMPUS ISOLATION: Find current term structure strictly for studentCampus
     const currentStructure = allStructures.find(struct => 
+      struct.campus === studentCampus &&
       normalizeClassName(struct.className) === studentNormalizedClass &&
       struct.session === currentSession &&
       new RegExp(`^${currentTerm.trim()}$`, 'i').test(struct.term?.trim() || '')
@@ -585,7 +586,6 @@ export const getStudentById = async (req, res) => {
   try {
     const { id } = req.params;
 
-    // 🔴 Validate 24-character hexadecimal MongoDB ObjectId
     if (!mongoose.Types.ObjectId.isValid(id)) {
       return res.status(400).json({
         success: false,
@@ -623,7 +623,6 @@ export const updateStudent = async (req, res) => {
   try {
     const studentId = req.params.id;
 
-    // 🔴 Validate 24-character hexadecimal MongoDB ObjectId
     if (!mongoose.Types.ObjectId.isValid(studentId)) {
       return res.status(400).json({
         success: false,
@@ -659,7 +658,6 @@ export const updateStudent = async (req, res) => {
       ...restBody
     } = body;
 
-    // 🟢 SANITIZE CAMPUS: Clean array or comma-duplicated inputs ('Great Campus,Great Campus')
     let sanitizedCampus = campus;
     if (Array.isArray(sanitizedCampus)) {
       sanitizedCampus = sanitizedCampus[0];
@@ -673,7 +671,6 @@ export const updateStudent = async (req, res) => {
     if (gender !== undefined && gender !== null) student.gender = String(gender).trim();
     if (email !== undefined && email !== null) student.email = String(email).toLowerCase().trim();
     
-    // Explicitly handle Address Fields
     const targetAddress = address || residentialAddress;
     if (targetAddress !== undefined && targetAddress !== null) {
       student.address = String(targetAddress).trim();
@@ -682,7 +679,6 @@ export const updateStudent = async (req, res) => {
       student.guardianAddress = String(guardianAddress).trim();
     }
 
-    // Assign single sanitized campus string
     if (sanitizedCampus) {
       student.campus = String(sanitizedCampus).trim();
     }
@@ -702,7 +698,6 @@ export const updateStudent = async (req, res) => {
       student.admittedTerm = activeTerm;
     }
 
-    // 🔴 Delete custom handled keys from restBody so Object.assign does not cause conflicts
     delete restBody.campus;
     delete restBody.address;
     delete restBody.residentialAddress;
@@ -746,7 +741,6 @@ export const deleteStudent = async (req, res) => {
   try {
     const studentId = req.params.id;
 
-    // 🔴 Validate 24-character hexadecimal MongoDB ObjectId
     if (!mongoose.Types.ObjectId.isValid(studentId)) {
       return res.status(400).json({
         success: false,
