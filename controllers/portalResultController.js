@@ -7,7 +7,7 @@ import SystemConfig from '../models/SystemConfig.js';
 import FeeStructure from '../models/FeeStructure.js';
 import Payment from '../models/Payment.js';
 import Adjustment from '../models/Adjustment.js';
-import { normalizeClassName } from './financeHelpers.js';
+import { normalizeClassName, isStudentEnrolledInTerm } from './financeHelpers.js';
 import { buildStudentResultSubjects } from '../utils/resultEngine.js';
 
 const getBase64Image = (relativePath) => {
@@ -46,6 +46,21 @@ const getTermOrder = (termName) => {
 };
 
 /**
+ * Helper to check if a target (session, term) is on or before a reference (refSession, refTerm)
+ * Returns true for past terms and the exact requested term; false for future terms.
+ */
+const isOnOrBeforeTerm = (targetSession, targetTerm, refSession, refTerm) => {
+  const targetYear = getSessionStartYear(targetSession);
+  const refYear = getSessionStartYear(refSession);
+
+  if (targetYear !== refYear) {
+    return targetYear < refYear;
+  }
+
+  return getTermOrder(targetTerm) <= getTermOrder(refTerm);
+};
+
+/**
  * @route   GET /api/teachers/download-result-pdf/:studentId
  * @desc    Generate printable/downloadable report card HTML
  */
@@ -55,7 +70,7 @@ export const downloadStudentResultPdf = async (req, res) => {
     const { term, session, className, download } = req.query;
 
     const studentDoc = await Student.findById(studentId).lean().catch(() => null);
-    
+
     // Find matching review by studentId or _id
     const review = await ResultReview.findOne({
       $or: [{ studentId }, { _id: studentId }],
@@ -65,7 +80,7 @@ export const downloadStudentResultPdf = async (req, res) => {
 
     const activeTerm = term || review?.term || 'Second Term';
     const activeSession = session || review?.session || '2026/2027';
-    
+
     // Prioritize review.className so historical PDFs display the actual historical class
     const activeClass = className || review?.className || studentDoc?.assignedClass || studentDoc?.currentClass || 'KG 1';
 
@@ -249,7 +264,7 @@ export const downloadStudentResultPdf = async (req, res) => {
 
 /**
  * @route   GET /api/teachers/my-results/:studentId
- * @desc    Fetch released results for student portal with automated global live debt gate
+ * @desc    Fetch released results for student portal with term-scoped financial clearance gate
  */
 export const getStudentPortalResults = async (req, res) => {
   try {
@@ -261,16 +276,16 @@ export const getStudentPortalResults = async (req, res) => {
     }
 
     const systemSettings = await SystemConfig.findOne({}).lean();
-    const activeSession = session || systemSettings?.currentSession || "2026/2027";
-    const activeTerm = term || systemSettings?.currentTerm || "Second Term";
+    const activeSession = (session || systemSettings?.currentSession || "2026/2027").trim();
+    const activeTerm = (term || systemSettings?.currentTerm || "First Term").trim();
 
-    const student = await Student.findById(studentId).lean();
+    const student = await Student.findById(studentId).populate('user', 'campus').lean();
     if (!student) return res.status(404).json({ success: false, message: "Student record not found." });
 
     const review = await ResultReview.findOne({
       studentId: student._id,
-      term: new RegExp(`^${activeTerm.trim()}$`, 'i'),
-      session: activeSession.trim(),
+      term: new RegExp(`^${activeTerm}$`, 'i'),
+      session: activeSession,
       $or: [
         { status: 'Released' },
         { isPublished: true },
@@ -287,64 +302,82 @@ export const getStudentPortalResults = async (req, res) => {
       });
     }
 
-    // 🟢 ACCURATE CAMPUS & CLASS DEBT GATE: Filter fee structures strictly by student's campus and class
-    const studentCampus = student.campus || 'Emerald Campus';
-    const studentClass = student.currentClass || student.assignedClass || '';
-    const normClass = normalizeClassName(studentClass);
+    // 🟢 STRICT CAMPUS RESOLUTION
+    const rawCampus = student.campus || student.user?.campus || req.user?.campus || 'Emerald Campus';
+    const studentCampus = String(rawCampus).trim();
+    const campusRegex = new RegExp(`^${studentCampus.replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&')}$`, 'i');
 
     const basePreviousOutstanding = Number(student.previousOutstanding) || 0;
 
-    // Search fee structures matching student's campus and class
-    const relevantStructures = await FeeStructure.find({
-      $and: [
-        { $or: [{ campus: studentCampus }, { campus: { $exists: false } }, { campus: null }] },
-        {
-          $or: [
-            { className: studentClass },
-            { className: new RegExp(`^${studentClass}$`, 'i') },
-            { className: normClass }
-          ]
-        }
-      ]
+    // Fetch all historical reviews to resolve the student's class per term accurately
+    const allStudentReviews = await ResultReview.find({ studentId: student._id }).lean();
+    const resolveClassForTerm = (chkSession, chkTerm) => {
+      const match = allStudentReviews.find(r =>
+        r.session === chkSession && r.term?.trim().toLowerCase() === chkTerm?.trim().toLowerCase()
+      );
+      if (match && match.className) return match.className;
+      return student.currentClass || student.assignedClass || '';
+    };
+
+    // Fetch all fee structures strictly isolated to this student's campus
+    const campusStructures = await FeeStructure.find({
+      campus: campusRegex
     }).lean();
 
-    let totalGlobalFeesExpected = basePreviousOutstanding;
+    let cumulativeFeesDueUpToResultTerm = basePreviousOutstanding;
+    const intakeSession = String(student.intakeSession || student.admittedSession || student.admissionSession || '').trim();
 
-    // Aggregate fee expectations strictly for this student's campus & class
-    relevantStructures.forEach(struct => {
-      const intakeSession = String(student.intakeSession || student.admittedSession || student.admissionSession || '').trim();
+    // 🟢 CHRONOLOGICAL TERM GATE:
+    // Only include fee structures up to and including the requested result's (activeSession, activeTerm).
+    // Future terms (e.g., Second Term when viewing First Term) are strictly excluded!
+    campusStructures.forEach(struct => {
+      const isActiveStruct = !struct.status || struct.status.toLowerCase() === 'active';
+      if (!isActiveStruct) return;
+
+      const isUpToRequestedTerm = isOnOrBeforeTerm(struct.session, struct.term, activeSession, activeTerm);
+      if (!isUpToRequestedTerm) return;
+
+      const wasEnrolled = isStudentEnrolledInTerm(student, struct.session, struct.term, studentCampus);
+      if (!wasEnrolled) return;
+
+      const classInThatTerm = resolveClassForTerm(struct.session, struct.term);
+      if (normalizeClassName(struct.className) !== normalizeClassName(classInThatTerm)) return;
+
       const studentType = intakeSession === struct.session ? 'New Students' : 'Returning Students';
 
-      struct.items?.forEach(item => {
+      (struct.items || []).forEach(item => {
         if (item.checked !== false && (item.appliesTo === 'All Students' || item.appliesTo === studentType)) {
-          totalGlobalFeesExpected += Number(item.amount) || 0;
+          cumulativeFeesDueUpToResultTerm += Number(item.amount) || 0;
         }
       });
     });
 
-    // Aggregate all financial adjustments for this student (increases/discounts)
+    // Apply only financial adjustments (Fee Increases / Discounts / Waivers) up to and including the requested term
     const adjustments = await Adjustment.find({ studentId: student._id }).lean();
     adjustments.forEach(adj => {
+      if (adj.session && adj.term && !isOnOrBeforeTerm(adj.session, adj.term, activeSession, activeTerm)) {
+        return; // Skip adjustments scheduled for future terms
+      }
       const amt = Number(adj.amount) || 0;
-      if (adj.type === 'Fee Increase') totalGlobalFeesExpected += amt;
-      if (adj.type === 'Discount' || adj.type === 'Waiver') totalGlobalFeesExpected -= amt;
+      if (adj.type === 'Fee Increase') cumulativeFeesDueUpToResultTerm += amt;
+      if (adj.type === 'Discount' || adj.type === 'Waiver') cumulativeFeesDueUpToResultTerm -= amt;
     });
 
     // Aggregate all-time successful payments made by this student
     const successfulPayments = await Payment.find({ studentId: student._id, status: 'Successful' }).lean();
     const totalPaidAllTime = successfulPayments.reduce((sum, p) => sum + (Number(p.amountPaid) || 0), 0);
 
-    // Calculate live active balance for this student
-    const activeGlobalDebt = Math.max(0, totalGlobalFeesExpected - totalPaidAllTime);
+    // Calculate live outstanding balance strictly up to the requested result term
+    const outstandingForResultTerm = Math.max(0, cumulativeFeesDueUpToResultTerm - totalPaidAllTime);
 
-    // Lock results ONLY if student has a real outstanding balance for THEIR campus & class
-    if (activeGlobalDebt > 0) {
+    // Lock results ONLY if student owes money for this term or an earlier term
+    if (outstandingForResultTerm > 0) {
       return res.status(200).json({
         success: true,
         isReleased: true,
         isCleared: false,
-        outstandingBalance: activeGlobalDebt,
-        message: "Financial restriction active. Student has an uncleared account balance."
+        outstandingBalance: outstandingForResultTerm,
+        message: `Financial restriction active. Student has an uncleared balance of ₦${outstandingForResultTerm.toLocaleString()} up to ${activeTerm} (${activeSession}).`
       });
     }
 
