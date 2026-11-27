@@ -1,6 +1,6 @@
 // controllers/authController.js
 import User from '../models/User.js';
-import Student from '../models/Student.js'; 
+import Student from '../models/Student.js';
 import RefreshToken from '../models/RefreshToken.js';
 import bcrypt from 'bcryptjs';
 import crypto from 'crypto';
@@ -30,7 +30,7 @@ const getSessionYearPrefix = (sessionStr) => {
 
 /**
  * @route   POST /api/auth/login
- * @desc    Authenticate administrative, staff, and student personnel using secure httpOnly cookies
+ * @desc    Authenticate administrative, staff, and student personnel using both httpOnly cookies and JSON tokens
  * @access  Public
  */
 export const loginUser = async (req, res) => {
@@ -54,9 +54,9 @@ export const loginUser = async (req, res) => {
     }).select('+password');
 
     if (!user) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "Invalid credentials recorded." 
+      return res.status(400).json({
+        success: false,
+        message: "Invalid credentials recorded."
       });
     }
 
@@ -79,15 +79,14 @@ export const loginUser = async (req, res) => {
     }
 
     if (!isMatch) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "Invalid credentials recorded." 
+      return res.status(400).json({
+        success: false,
+        message: "Invalid credentials recorded."
       });
     }
 
-    // 🔐 CHECK IF 2FA IS ENABLED FOR THIS ACCOUNT (ADMIN PROTECTION)
+    // CHECK IF 2FA IS ENABLED FOR THIS ACCOUNT (ADMIN PROTECTION)
     if (user.isTwoFactorEnabled) {
-      // If no 2FA token provided yet, prompt the frontend to request 2FA code
       if (!twoFactorToken) {
         return res.status(200).json({
           success: true,
@@ -97,7 +96,6 @@ export const loginUser = async (req, res) => {
         });
       }
 
-      // Verify the provided 2FA token against stored secret
       const userWithSecret = await User.findById(user._id).select('+twoFactorSecret');
       const isValid2FA = authenticator.check(twoFactorToken, userWithSecret.twoFactorSecret);
 
@@ -113,7 +111,7 @@ export const loginUser = async (req, res) => {
     const accessToken = generateAccessToken(user._id);
     const refreshToken = await generateAndStoreRefreshToken(user._id);
 
-    // Attach httpOnly cookies to response
+    // Attach httpOnly cookies to response (Desktop support)
     res.cookie('accessToken', accessToken, { ...COOKIE_OPTIONS, maxAge: 15 * 60 * 1000 }); // 15 mins
     res.cookie('refreshToken', refreshToken, { ...COOKIE_OPTIONS, maxAge: 7 * 24 * 60 * 60 * 1000 }); // 7 days
 
@@ -129,6 +127,9 @@ export const loginUser = async (req, res) => {
     return res.status(200).json({
       success: true,
       message: `Welcome back, ${user.name || 'User'}`,
+      token: accessToken,
+      accessToken,
+      refreshToken,
       user: {
         id: user._id,
         name: user.name || '',
@@ -150,8 +151,8 @@ export const loginUser = async (req, res) => {
 
   } catch (error) {
     console.error("💥 Auth Pipeline Exception:", error);
-    return res.status(500).json({ 
-      success: false, 
+    return res.status(500).json({
+      success: false,
       message: "Server error during authentication."
     });
   }
@@ -159,12 +160,12 @@ export const loginUser = async (req, res) => {
 
 /**
  * @route   POST /api/auth/refresh
- * @desc    Rotate and re-issue short-lived access tokens using hashed refresh token check
- * @access  Public (Cookie Based)
+ * @desc    Rotate and re-issue short-lived access tokens using cookie or request body refresh token
+ * @access  Public
  */
 export const refreshTokenSession = async (req, res) => {
   try {
-    const rawRefreshToken = req.cookies?.refreshToken;
+    const rawRefreshToken = req.cookies?.refreshToken || req.body?.refreshToken;
     if (!rawRefreshToken) {
       return res.status(401).json({ success: false, message: "No refresh token provided." });
     }
@@ -192,7 +193,13 @@ export const refreshTokenSession = async (req, res) => {
     res.cookie('accessToken', newAccessToken, { ...COOKIE_OPTIONS, maxAge: 15 * 60 * 1000 });
     res.cookie('refreshToken', newRefreshToken, { ...COOKIE_OPTIONS, maxAge: 7 * 24 * 60 * 60 * 1000 });
 
-    return res.status(200).json({ success: true, message: "Session refreshed successfully." });
+    return res.status(200).json({
+      success: true,
+      message: "Session refreshed successfully.",
+      token: newAccessToken,
+      accessToken: newAccessToken,
+      refreshToken: newRefreshToken
+    });
   } catch (error) {
     console.error("💥 Refresh Token Pipeline Exception:", error);
     return res.status(500).json({ success: false, message: "Error refreshing session token." });
@@ -206,7 +213,7 @@ export const refreshTokenSession = async (req, res) => {
  */
 export const logoutUser = async (req, res) => {
   try {
-    const rawRefreshToken = req.cookies?.refreshToken;
+    const rawRefreshToken = req.cookies?.refreshToken || req.body?.refreshToken;
     if (rawRefreshToken) {
       const tokenHash = crypto.createHash('sha256').update(rawRefreshToken).digest('hex');
       await RefreshToken.updateOne({ tokenHash }, { revoked: true });
@@ -228,15 +235,15 @@ export const logoutUser = async (req, res) => {
  * @access  Private (Admin Control Panel)
  */
 export const registerStudent = async (req, res) => {
-  let createdBaseUser = null; 
-  
+  let createdBaseUser = null;
+
   try {
-    const { 
-      surname, 
-      firstName, 
-      otherName, 
+    const {
+      surname,
+      firstName,
+      otherName,
       assignedClass,
-      currentClass, 
+      currentClass,
       campus,
       admittedSession,
       intakeSession,
@@ -244,9 +251,9 @@ export const registerStudent = async (req, res) => {
       admittedTerm,
       intakeTerm,
       admissionTerm,
-      gender, 
-      email, 
-      phone, 
+      gender,
+      email,
+      phone,
       stateOfOrigin,
       lga,
       homeTown,
@@ -298,17 +305,17 @@ export const registerStudent = async (req, res) => {
     }
 
     const sessionYearShort = getSessionYearPrefix(targetSession);
-    
+
     let autoGeneratedRegNo;
     let isUsernameTaken = true;
 
     while (isUsernameTaken) {
       const randomNumericSuffix = Math.floor(1000 + crypto.randomInt(0, 9000));
       autoGeneratedRegNo = `RC/${sessionYearShort}/${randomNumericSuffix}`;
-      
+
       const userCheck = await User.findOne({ username: autoGeneratedRegNo });
       if (!userCheck) {
-        isUsernameTaken = false; 
+        isUsernameTaken = false;
       }
     }
 
@@ -324,7 +331,6 @@ export const registerStudent = async (req, res) => {
       passportPhotoUrl = req.file.path || req.file.secure_url || req.file.url || "";
     }
 
-    // Robust Address Fallback Resolution
     const resolvedAddress = (address || residentialAddress || homeAddress || "").trim();
     const resolvedGuardianAddress = (guardianAddress || resolvedAddress || "").trim();
 
@@ -351,13 +357,13 @@ export const registerStudent = async (req, res) => {
 
     // 3. Create Student Record
     const newStudent = await Student.create({
-      user: createdBaseUser._id, 
+      user: createdBaseUser._id,
       name: fullName,
       surname: safeSurname,
       firstName: safeFirstName,
       otherName: safeOtherName,
       admissionNo: autoGeneratedRegNo,
-      currentClass: targetClass, 
+      currentClass: targetClass,
       assignedClass: targetClass,
       campus: targetCampus,
       admittedSession: targetSession,
@@ -377,8 +383,8 @@ export const registerStudent = async (req, res) => {
       genotype: genotype && String(genotype).trim() !== "" ? String(genotype).trim() : undefined,
       religion: religion && String(religion).trim() !== "" ? String(religion).trim() : undefined,
       address: resolvedAddress || undefined,
-      password: temporaryPassword, 
-      passportPhoto: passportPhotoUrl, 
+      password: temporaryPassword,
+      passportPhoto: passportPhotoUrl,
       role: 'student',
 
       fatherName: fatherName ? String(fatherName).trim() : "",
@@ -407,7 +413,7 @@ export const registerStudent = async (req, res) => {
 
   } catch (error) {
     if (createdBaseUser) {
-      await User.deleteOne({ _id: createdBaseUser._id }).catch((err) => 
+      await User.deleteOne({ _id: createdBaseUser._id }).catch((err) =>
         console.error("⚠️ Failed cleaning up orphan record:", err)
       );
     }
@@ -439,17 +445,17 @@ export const getAllStudents = async (req, res) => {
 
     if (req.query.search && req.query.search.trim() !== '') {
       queryFilters.$or = [
-        { name: { $regex: req.query.search.trim(),$options: "i" } },
-        { surname: { $regex: req.query.search.trim(),$options: "i" } },
-        { firstName: { $regex: req.query.search.trim(),$options: "i" } },
-        { admissionNo: { $regex: req.query.search.trim(),$options: "i" } }
+        { name: { $regex: req.query.search.trim(), $options: "i" } },
+        { surname: { $regex: req.query.search.trim(), $options: "i" } },
+        { firstName: { $regex: req.query.search.trim(), $options: "i" } },
+        { admissionNo: { $regex: req.query.search.trim(), $options: "i" } }
       ];
     }
-    
+
     if (req.query.assignedClass || req.query.currentClass) {
       const cls = String(req.query.assignedClass || req.query.currentClass).trim();
       const classRegex = new RegExp(`^${cls.replace(/\s+/g, '\\s*')}$`, 'i');
-      
+
       const classConditions = [
         { currentClass: classRegex },
         { assignedClass: classRegex },
@@ -514,10 +520,10 @@ export const getDashboardStats = async (req, res) => {
     const filter = (campus && campus !== 'All Campuses') ? { campus } : {};
 
     const totalStudents = await Student.countDocuments(filter);
-    
-    const activeTeachers = await User.countDocuments({ 
+
+    const activeTeachers = await User.countDocuments({
       ...filter,
-      role: { $in: ['teacher', 'principal', 'TEACHER', 'PRINCIPAL'] } 
+      role: { $in: ['teacher', 'principal', 'TEACHER', 'PRINCIPAL'] }
     });
 
     return res.status(200).json({
@@ -530,8 +536,8 @@ export const getDashboardStats = async (req, res) => {
     });
   } catch (error) {
     console.error("💥 Dashboard statistics pipeline exception:", error);
-    return res.status(500).json({ 
-      success: false, 
+    return res.status(500).json({
+      success: false,
       message: "Internal server error gathering dashboard overview metrics."
     });
   }
@@ -543,12 +549,12 @@ export const getDashboardStats = async (req, res) => {
 export const updatePassword = async (req, res) => {
   try {
     const { currentPassword, newPassword } = req.body;
-    const userId = req.user.id; 
+    const userId = req.user.id;
 
     if (!currentPassword || !newPassword) {
-      return res.status(400).json({ 
-        success: false, 
-        message: "Please provide both your current and new password." 
+      return res.status(400).json({
+        success: false,
+        message: "Please provide both your current and new password."
       });
     }
 
@@ -589,9 +595,9 @@ export const updatePassword = async (req, res) => {
 
   } catch (error) {
     console.error("💥 Password migration pipeline error:", error);
-    return res.status(500).json({ 
-      success: false, 
-      message: "Internal server error upgrading credential properties." 
+    return res.status(500).json({
+      success: false,
+      message: "Internal server error upgrading credential properties."
     });
   }
 };
