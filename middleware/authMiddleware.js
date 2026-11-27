@@ -3,17 +3,21 @@ import jwt from "jsonwebtoken";
 import User from "../models/User.js";
 
 /**
- * 🔐 Hardened Global Cookie & JWT Verification Gatekeeper
+ * 🔐 Hardened Global Cookie & Bearer JWT Verification Gatekeeper
  */
 export const verifyToken = async (req, res, next) => {
   try {
-    // 1. Extract token from secure httpOnly cookie
-    const token = req.cookies?.accessToken;
+    // 1. Extract token from httpOnly cookie OR Authorization Bearer header (iOS Safari fallback)
+    let token = req.cookies?.accessToken;
 
-    if (!token) {
+    if (!token && req.headers.authorization?.startsWith("Bearer ")) {
+      token = req.headers.authorization.split(" ")[1];
+    }
+
+    if (!token || token === "null" || token === "undefined") {
       return res.status(401).json({ 
         success: false, 
-        message: "Authentication required. No session cookie detected." 
+        message: "Authentication required. No valid session token detected." 
       });
     }
 
@@ -53,72 +57,4 @@ export const verifyToken = async (req, res, next) => {
       message: "Session expired or invalid authorization token signature." 
     });
   }
-};
-
-/**
- * 🛡️ Role Gate: Administrative Clearance Enforcer
- */
-export const isAdmin = (req, res, next) => {
-  if (req.user && req.user.role?.toLowerCase() === "admin") {
-    next();
-  } else {
-    return res.status(403).json({ 
-      success: false, 
-      message: "Forbidden Access. Administrative clearance levels required." 
-    });
-  }
-};
-
-/**
- * 🧑‍🎓 Role Gate: Student Account Enforcer
- */
-export const isStudent = (req, res, next) => {
-  if (req.user && req.user.role?.toLowerCase() === "student") {
-    next();
-  } else {
-    return res.status(403).json({ 
-      success: false, 
-      message: "Forbidden Access. Student account clearance required." 
-    });
-  }
-};
-
-/**
- * 🛡️ Role Gate: Teacher, Staff & Admin Enforcer
- */
-export const protectTeacher = async (req, res, next) => {
-  if (!req.user) {
-    return verifyToken(req, res, () => protectTeacher(req, res, next));
-  }
-
-  const userRole = req.user?.role?.toLowerCase() || '';
-  const allowedRoles = ['teacher', 'class teacher', 'headmaster', 'principal', 'admin', 'executive', 'staff', 'faculty'];
-
-  if (allowedRoles.includes(userRole) || req.user?.schoolSection || req.user?.isClassTeacher || req.user?.classTeacherOf) {
-    return next();
-  }
-
-  return res.status(403).json({ 
-    success: false, 
-    message: "Forbidden Access. Teacher or Administrative clearance required." 
-  });
-};
-
-/**
- * 🧑‍🎓 Role Gate: Student Account Token Enforcer
- */
-export const protectStudent = async (req, res, next) => {
-  if (!req.user) {
-    return verifyToken(req, res, () => protectStudent(req, res, next));
-  }
-
-  const userRole = req.user?.role?.toLowerCase() || '';
-  if (userRole === 'student' || req.user?.admissionNo) {
-    return next();
-  }
-
-  return res.status(403).json({ 
-    success: false, 
-    message: "Forbidden Access. Student account token context signature required." 
-  });
 };
